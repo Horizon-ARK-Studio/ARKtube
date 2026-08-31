@@ -1,0 +1,99 @@
+name: Stage 0 - Feasibility Check
+
+# Boots the ARKtube Neutralino shell (per docs/PROBLEM-STATEMENT.md, Phase 0)
+# on a real, internet-connected runner, since youtube.com cannot be reached
+# from the sandboxed environment this was scaffolded in. Captures the
+# Neutralino log and a screenshot of the rendered window as artifacts so the
+# Stage 0 checklist in ARKtube/README.md can be evaluated from CI output.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ARKtube/**"
+      - ".github/workflows/stage0.yml"
+  pull_request:
+    paths:
+      - "ARKtube/**"
+      - ".github/workflows/stage0.yml"
+  workflow_dispatch: {}
+
+jobs:
+  stage0-linux:
+    name: Boot ARKtube (Linux, WebKitGTK)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ARKtube
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (WebKitGTK, Xvfb, screenshot tool)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-0 \
+            xvfb \
+            imagemagick \
+            x11-apps
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Neutralino CLI
+        run: npm install -g @neutralinojs/neu
+
+      - name: Make prebuilt binary executable
+        run: chmod +x bin/neutralino-linux_x64
+
+      - name: Launch ARKtube under Xvfb and capture output
+        id: launch
+        run: |
+          set -x
+          Xvfb :99 -screen 0 1280x800x24 &
+          XVFB_PID=$!
+          export DISPLAY=:99
+          sleep 2
+
+          # neu run starts the resource server + the native window, pointed
+          # at https://www.youtube.com per neutralino.config.json.
+          neu run --no-window-controls > neu-run.log 2>&1 &
+          NEU_PID=$!
+
+          # Give the WebView time to request youtube.com and render.
+          sleep 20
+
+          # Capture whatever is on the virtual display, regardless of
+          # whether the page fully loaded — this is the Stage 0 evidence.
+          import -window root screenshot.png || echo "screenshot capture failed" | tee -a neu-run.log
+
+          # Let it run a little longer so async errors/log lines land.
+          sleep 5
+
+          kill "$NEU_PID" 2>/dev/null || true
+          sleep 2
+          kill "$XVFB_PID" 2>/dev/null || true
+
+          echo "----- neu-run.log -----"
+          cat neu-run.log || true
+
+      - name: Locate Neutralino's own log file
+        if: always()
+        run: |
+          find . -iname "*.log" -newer neutralino.config.json -exec echo {} \; -exec cat {} \; || true
+
+      - name: Upload Stage 0 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-output-linux
+          path: |
+            ARKtube/screenshot.png
+            ARKtube/neu-run.log
+            ARKtube/**/*.log
+          if-no-files-found: warn
+          retention-days: 14

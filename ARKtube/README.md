@@ -1,6 +1,6 @@
-# youtube-desktop (Stage 0)
+# ARKtube (Stage 0)
 
-Neutralinojs project for the YT-Desktop MVP. This is **Stage 0 / Phase 0** from
+Neutralinojs project for the ARKtube MVP. This is **Stage 0 / Phase 0** from
 [`docs/PROBLEM-STATEMENT.md`](../docs/PROBLEM-STATEMENT.md): no custom UI, no
 navigation controller yet — the only job right now is proving that
 `https://www.youtube.com` loads and behaves inside Neutralino's native WebView.
@@ -42,7 +42,7 @@ npm install -g @neutralinojs/neu
 ## Run it
 
 ```bash
-cd youtube-desktop
+cd ARKtube
 neu run
 ```
 

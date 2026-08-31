@@ -1,4 +1,6 @@
-# YouTube, as a desktop app.
+# ARKtube
+
+## YouTube, as a desktop app.
 
 A lightweight YouTube desktop client built with [Neutralinojs](https://neutralino.js.org).
 

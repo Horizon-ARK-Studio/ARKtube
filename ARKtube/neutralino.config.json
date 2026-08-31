@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
-  "applicationId": "com.ytdesktop.app",
+  "applicationId": "com.arktube.app",
   "version": "0.1.0",
   "defaultMode": "window",
   "port": 0,
@@ -20,7 +20,7 @@
   ],
   "modes": {
     "window": {
-      "title": "YT Desktop",
+      "title": "ARKtube",
       "width": 1280,
       "height": 800,
       "minWidth": 800,
@@ -61,7 +61,7 @@
     }
   },
   "cli": {
-    "binaryName": "youtube-desktop",
+    "binaryName": "ARKtube",
     "resourcesPath": "/resources/",
     "extensionsPath": "/extensions/",
     "clientLibrary": "/resources/js/neutralino.js",

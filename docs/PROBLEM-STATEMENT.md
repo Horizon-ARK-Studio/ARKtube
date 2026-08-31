@@ -1,4 +1,4 @@
-# YouTube Desktop Client
+# ARKtube
 
 ## Design Document
 
@@ -160,7 +160,7 @@ The desktop shell must never be destroyed simply because the user navigates betw
 The Neutralino application should initially be extremely thin.
 
 ```text
-youtube-desktop/
+ARKtube/
 │
 ├── neutralino.config.json
 │
@@ -1107,7 +1107,7 @@ The migration is progressive rather than a rewrite.
 # 26. Initial Repository Structure
 
 ```text
-youtube-desktop/
+ARKtube/
 │
 ├── neutralino.config.json
 │
