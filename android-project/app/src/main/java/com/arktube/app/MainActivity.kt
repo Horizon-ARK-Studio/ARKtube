@@ -112,6 +112,13 @@ class MainActivity : AppCompatActivity() {
     private var customView: android.view.View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
 
+    // Set once in onCreate as the Activity's one and only
+    // setContentView() target, and never swapped out again -- see
+    // onShowCustomView()/onHideCustomView() for why. Holds webView
+    // for the app's entire lifetime; the fullscreen container is
+    // added/removed as a second child on top of it.
+    private lateinit var rootLayout: FrameLayout
+
     // Wraps the raw customView Chromium hands us in onShowCustomView
     // together with the stretch-to-fill toggle button, so the button
     // rides along as a native overlay on top of the video for the
@@ -158,7 +165,35 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView = WebView(this)
-        setContentView(webView)
+
+        // webView is added to rootLayout here and never removed or
+        // detached again for the rest of the Activity's life --
+        // notably, *not even while fullscreen video is showing*. See
+        // onShowCustomView()/onHideCustomView() below for why that
+        // matters: Android's WebView ties the page's Page Visibility
+        // API (document.hidden/'visibilitychange') to the WebView's
+        // own window-attachment state, not just whether the app is
+        // foregrounded. A previous version of this code called
+        // setContentView(customView) to show fullscreen video, which
+        // fully detached webView from the window for as long as
+        // fullscreen was showing -- firing document.hidden = true
+        // into the page the instant fullscreen started. YouTube's
+        // player treats that the same as the tab going to the
+        // background and reacts by exiting fullscreen again almost
+        // immediately, which is what was showing up as fullscreen
+        // "blinking and reverting back" on a real device. Keeping
+        // webView permanently attached (just visually covered by the
+        // fullscreen container on top of it) avoids ever triggering
+        // that signal.
+        rootLayout = FrameLayout(this)
+        rootLayout.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        setContentView(rootLayout)
 
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
@@ -225,7 +260,20 @@ class MainActivity : AppCompatActivity() {
                 customViewCallback = callback
                 val container = buildFullscreenContainer(view)
                 fullscreenContainer = container
-                setContentView(container)
+                // Added as a second child of rootLayout, on top of
+                // webView -- webView itself is never removed/hidden
+                // (see the comment on rootLayout's setup in
+                // onCreate for why that matters). The container is
+                // opaque (it's the video), so this looks identical
+                // to swapping the content view outright, without the
+                // page-visibility side effect that swapping caused.
+                rootLayout.addView(
+                    container,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
                 // Snapshot whatever orientation the activity was
                 // actually in right now, so exiting fullscreen snaps
                 // back to that -- not a hardcoded default -- even if
@@ -255,7 +303,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             override fun onHideCustomView() {
-                setContentView(webView)
+                fullscreenContainer?.let { rootLayout.removeView(it) }
                 fullscreenContainer?.removeAllViews()
                 fullscreenContainer = null
                 stretchToggleButton = null
