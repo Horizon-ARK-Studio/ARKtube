@@ -195,6 +195,41 @@ neu build
 
 Neutralino's build process is intentionally lightweight and does not require bundling an entire Chromium runtime into the application.
 
+### Linux: building the AppImage
+
+```bash
+cd ARKtube/
+neu update                       # fetch the pinned 6.8.0 binaries
+./packaging/linux/build-appimage.sh
+```
+
+This produces a self-contained `ARKtube-x86_64.AppImage` that embeds its
+resources and ships an `AppRun` wrapper. Don't hand-wrap the raw
+`neutralino-linux_x64` binary in an AppImage yourself — see
+`docs/FIX-PROPOSAL.md` for why that reliably crashes on launch, and what
+the wrapper does about it.
+
+### Linux: hardware-accelerated playback
+
+ARKtube's webview is WebKitGTK, the same engine GNOME Web uses, and the
+same playback stack Firefox's GTK build ultimately hands off to for
+VA-API decode. For smooth, hardware-accelerated YouTube playback
+(comparable to Firefox), install the full GStreamer plugin set:
+
+```bash
+# Debian/Ubuntu
+sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+                  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
+                  gstreamer1.0-libav gstreamer1.0-vaapi gstreamer1.0-gl
+```
+
+Without `gstreamer1.0-plugins-bad`, subtitles fall back to a degraded
+path ("WebKit wasn't able to find a WebVTT encoder"). Without
+`gstreamer1.0-vaapi` and `gstreamer1.0-gl`, video decode and compositing
+run entirely on the CPU. See `docs/FIX-PROPOSAL.md` for the full
+explanation, including how to pick the right `LIBVA_DRIVER_NAME` for
+your GPU.
+
 ---
 
 ## Roadmap
