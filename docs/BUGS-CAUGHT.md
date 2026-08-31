@@ -179,3 +179,4 @@ This proposal does not touch:
 - Windows/macOS packaging (unaffected — the read-only-mount problem is
   AppImage-specific),
 - YouTube's own frontend or player.
+
