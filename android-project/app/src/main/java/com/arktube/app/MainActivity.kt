@@ -33,10 +33,20 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    the fullscreen button to do anything
  *  - zooms fullscreen video to fill the screen (cropping any
  *    letterbox/pillarbox bars) instead of leaving YouTube's default
- *    letterboxed "fit" framing -- see ZOOM_TO_FILL_JS below
+ *    letterboxed "fit" framing -- see ZOOM_TO_FILL_JS below. Done via
+ *    a CSS transform on the <video> paint layer only, specifically
+ *    *not* by resizing its layout box: an earlier version forced the
+ *    box itself to fill the screen, which desynced YouTube's own
+ *    click-hit-testing math (computed against the box's real,
+ *    unforced size) and upscaled the decoded frame well past its
+ *    native resolution, which is what was showing up as "blurry and
+ *    nothing's clickable."
  *  - keeps the status/nav bar color in sync with whichever theme
  *    YouTube itself is rendering (its own light/dark toggle, not the
  *    phone's system theme) -- see THEME_SYNC_JS and ThemeBridge below
+ *  - hides YouTube's "open app" nag button/banner (nudging you at the
+ *    native YouTube app instead) since this app already *is* that
+ *    experience wrapped natively -- see HIDE_OPEN_APP_JS below
  *
  * Explicitly out of scope for Stage 0 (future stages, see the
  * repo-root roadmap): a persistent nav shell/sidebar, download
@@ -91,6 +101,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageFinished(view, url)
                 view.evaluateJavascript(ZOOM_TO_FILL_JS, null)
                 view.evaluateJavascript(THEME_SYNC_JS, null)
+                view.evaluateJavascript(HIDE_OPEN_APP_JS, null)
             }
         }
         webView.webChromeClient = object : WebChromeClient() {
@@ -109,11 +120,11 @@ class MainActivity : AppCompatActivity() {
                 customView = view
                 customViewCallback = callback
                 setContentView(view)
-                // Re-inject on entering fullscreen too: the
-                // stylesheet from onPageFinished should already be
-                // there, but YouTube's SPA navigation can swap in a
-                // fresh player instance between page load and the
-                // fullscreen tap, so make sure it's applied now.
+                // Safety net: ZOOM_TO_FILL_JS should already be
+                // installed from onPageFinished, but this covers the
+                // (unlikely) case fullscreen was reached before that
+                // fired. Harmless to call again either way -- it's
+                // guarded against installing its listeners twice.
                 webView.evaluateJavascript(ZOOM_TO_FILL_JS, null)
             }
 
@@ -194,31 +205,85 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val SITE_URL = "https://m.youtube.com"
 
-        // Forces fullscreen video to zoom-to-fill (crop to the
-        // screen edges) instead of YouTube's default zoom-to-fit
-        // (letterboxed, with black bars on mismatched aspect
-        // ratios). Injected as a <style> tag rather than one-off
-        // inline styles so it survives YouTube's own player
-        // re-renders, which reset inline style attributes but leave
-        // stylesheet rules alone. Idempotent: re-running it just
-        // reuses the existing <style> tag instead of stacking dupes.
+        // Crops fullscreen video to fill the screen instead of
+        // YouTube's default letterboxed "fit". Scoped to *only* the
+        // <video> element inside document.fullscreenElement, and
+        // *only* a CSS transform -- never its layout box (width/
+        // height/object-fit), since YouTube's own controls read the
+        // video's real box size to position/hit-test themselves; a
+        // transform changes what's painted (and, correctly, what
+        // taps land on) without touching that box at all, so the
+        // controls stay exactly where YouTube put them.
+        //
+        // Re-evaluates on fullscreenchange, on resize (covers
+        // rotation), and a couple of short delayed retries after
+        // entering fullscreen, since YouTube sometimes resizes its
+        // player again shortly after the fullscreen transition
+        // itself (e.g. once it settles on the actual stream
+        // dimensions). Guarded by a flag on `window` so re-injecting
+        // this on every onPageFinished doesn't register duplicate
+        // listeners within the same page's JS context.
         private const val ZOOM_TO_FILL_JS = """
             (function() {
-                var STYLE_ID = 'arktube-zoom-to-fill';
-                if (document.getElementById(STYLE_ID)) { return; }
-                var style = document.createElement('style');
-                style.id = STYLE_ID;
-                style.textContent =
-                    ':fullscreen video, ' +
-                    ':-webkit-full-screen video, ' +
-                    '.html5-video-player.ytp-fullscreen video, ' +
-                    '.html5-video-player.ytp-fullscreen .html5-main-video, ' +
-                    '.html5-video-player.ytp-fullscreen .video-stream { ' +
-                    '  object-fit: cover !important; ' +
-                    '  width: 100% !important; ' +
-                    '  height: 100% !important; ' +
-                    '}';
-                document.head.appendChild(style);
+                if (window.__arktubeZoomToFillInstalled) { return; }
+                window.__arktubeZoomToFillInstalled = true;
+
+                var zoomedVideo = null;
+
+                function fullscreenVideo() {
+                    var el = document.fullscreenElement || document.webkitFullscreenElement;
+                    if (!el) { return null; }
+                    return el.tagName === 'VIDEO' ? el : el.querySelector('video');
+                }
+
+                function clearZoom(video) {
+                    if (!video) { return; }
+                    video.style.transform = '';
+                    video.style.transformOrigin = '';
+                }
+
+                function applyZoom() {
+                    var video = fullscreenVideo();
+                    if (zoomedVideo && zoomedVideo !== video) {
+                        clearZoom(zoomedVideo);
+                    }
+                    zoomedVideo = video;
+                    if (!video) { return; }
+
+                    var rect = video.getBoundingClientRect();
+                    if (!rect.width || !rect.height) { return; }
+
+                    var scale = Math.max(
+                        window.innerWidth / rect.width,
+                        window.innerHeight / rect.height
+                    );
+
+                    if (!isFinite(scale) || scale <= 1.01) {
+                        clearZoom(video);
+                        return;
+                    }
+
+                    video.style.transformOrigin = 'center center';
+                    video.style.transform = 'scale(' + scale.toFixed(4) + ')';
+                }
+
+                var pending = false;
+                function scheduleApplyZoom() {
+                    if (pending) { return; }
+                    pending = true;
+                    requestAnimationFrame(function() {
+                        pending = false;
+                        applyZoom();
+                    });
+                }
+
+                document.addEventListener('fullscreenchange', scheduleApplyZoom);
+                document.addEventListener('webkitfullscreenchange', scheduleApplyZoom);
+                window.addEventListener('resize', scheduleApplyZoom);
+                document.addEventListener('fullscreenchange', function() {
+                    setTimeout(scheduleApplyZoom, 300);
+                    setTimeout(scheduleApplyZoom, 1000);
+                });
             })();
         """
 
@@ -293,6 +358,61 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 setInterval(report, 2000);
+            })();
+        """
+
+        // Hides YouTube's own "open app"/install-the-app nag, in the
+        // topbar and as promo banners elsewhere on the page --
+        // there's no reason to prompt someone to switch to the
+        // native YouTube app when this *is* that experience, just
+        // wrapped natively.
+        //
+        // ".mobile-topbar-header-open-app-button" and
+        // "ytm-mealbar-promo-renderer" are the two concrete elements
+        // this is known to show up as, but since neither is
+        // documented anywhere and YouTube's markup can change
+        // without notice, this also falls back to a text-based scan
+        // restricted to header/topbar-ish containers -- broad enough
+        // to survive a class rename, narrow enough not to risk
+        // hiding unrelated header buttons that just happen to share
+        // a class prefix. Polled on an interval rather than a
+        // MutationObserver, since observing the whole document for
+        // this would fire constantly on a page as dynamic as
+        // YouTube's (video progress, live chat, etc.).
+        private const val HIDE_OPEN_APP_JS = """
+            (function() {
+                if (window.__arktubeHideOpenAppInstalled) { return; }
+                window.__arktubeHideOpenAppInstalled = true;
+
+                var STYLE_ID = 'arktube-hide-open-app';
+                if (!document.getElementById(STYLE_ID)) {
+                    var style = document.createElement('style');
+                    style.id = STYLE_ID;
+                    style.textContent =
+                        '.mobile-topbar-header-open-app-button, ' +
+                        'ytm-mealbar-promo-renderer { ' +
+                        '  display: none !important; ' +
+                        '}';
+                    document.head.appendChild(style);
+                }
+
+                function hideByText() {
+                    var scopes = document.querySelectorAll(
+                        'ytm-mobile-topbar-renderer, header, [class*="topbar" i]'
+                    );
+                    scopes.forEach(function(scope) {
+                        var candidates = scope.querySelectorAll('button, a, ytd-button-renderer, tp-yt-paper-button');
+                        candidates.forEach(function(el) {
+                            var text = (el.textContent || '').trim().toLowerCase();
+                            if (text === 'open app' || text === 'open in app' || text === 'get the app') {
+                                el.style.display = 'none';
+                            }
+                        });
+                    });
+                }
+
+                hideByText();
+                setInterval(hideByText, 1500);
             })();
         """
     }
