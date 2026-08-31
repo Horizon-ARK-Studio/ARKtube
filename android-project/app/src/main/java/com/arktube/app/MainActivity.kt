@@ -28,6 +28,9 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
  *  - allows fullscreen video (WebChromeClient's
  *    on/onHideCustomView) since YouTube's HTML5 player needs it for
  *    the fullscreen button to do anything
+ *  - zooms fullscreen video to fill the screen (cropping any
+ *    letterbox/pillarbox bars) instead of leaving YouTube's default
+ *    letterboxed "fit" framing -- see ZOOM_TO_FILL_JS below
  *
  * Explicitly out of scope for Stage 0 (future stages, see the
  * repo-root roadmap): a persistent nav shell/sidebar, download
@@ -64,7 +67,19 @@ class MainActivity : AppCompatActivity() {
         webView.settings.userAgentString = webView.settings.userAgentString
             ?.replace("; wv", "")
 
-        webView.webViewClient = WebViewClient()
+        webView.webViewClient = object : WebViewClient() {
+            // YouTube's fullscreen button doesn't hand the WebView a
+            // bare <video>; it puts the player into the page's own
+            // Fullscreen API and WebChromeClient.onShowCustomView
+            // just mirrors that DOM state natively. So the "fit"
+            // vs. "fill" framing is still ultimately CSS, and we can
+            // reapply it here on every page load so it's already in
+            // place by the time the fullscreen button is tapped.
+            override fun onPageFinished(view: WebView, url: String?) {
+                super.onPageFinished(view, url)
+                view.evaluateJavascript(ZOOM_TO_FILL_JS, null)
+            }
+        }
         webView.webChromeClient = object : WebChromeClient() {
             // Fullscreen video support: YouTube's player swaps in a
             // custom fullscreen view via these callbacks. Without
@@ -81,6 +96,12 @@ class MainActivity : AppCompatActivity() {
                 customView = view
                 customViewCallback = callback
                 setContentView(view)
+                // Re-inject on entering fullscreen too: the
+                // stylesheet from onPageFinished should already be
+                // there, but YouTube's SPA navigation can swap in a
+                // fresh player instance between page load and the
+                // fullscreen tap, so make sure it's applied now.
+                webView.evaluateJavascript(ZOOM_TO_FILL_JS, null)
             }
 
             override fun onHideCustomView() {
@@ -105,5 +126,33 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val SITE_URL = "https://m.youtube.com"
+
+        // Forces fullscreen video to zoom-to-fill (crop to the
+        // screen edges) instead of YouTube's default zoom-to-fit
+        // (letterboxed, with black bars on mismatched aspect
+        // ratios). Injected as a <style> tag rather than one-off
+        // inline styles so it survives YouTube's own player
+        // re-renders, which reset inline style attributes but leave
+        // stylesheet rules alone. Idempotent: re-running it just
+        // reuses the existing <style> tag instead of stacking dupes.
+        private const val ZOOM_TO_FILL_JS = """
+            (function() {
+                var STYLE_ID = 'arktube-zoom-to-fill';
+                if (document.getElementById(STYLE_ID)) { return; }
+                var style = document.createElement('style');
+                style.id = STYLE_ID;
+                style.textContent =
+                    ':fullscreen video, ' +
+                    ':-webkit-full-screen video, ' +
+                    '.html5-video-player.ytp-fullscreen video, ' +
+                    '.html5-video-player.ytp-fullscreen .html5-main-video, ' +
+                    '.html5-video-player.ytp-fullscreen .video-stream { ' +
+                    '  object-fit: cover !important; ' +
+                    '  width: 100% !important; ' +
+                    '  height: 100% !important; ' +
+                    '}';
+                document.head.appendChild(style);
+            })();
+        """
     }
 }

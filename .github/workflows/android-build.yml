@@ -14,7 +14,7 @@ name: Android build (ARKtube)
 # keep each workflow from running on the other's changes.
 on:
   push:
-    branches: [main]
+    branches: [main, Android]
     paths:
       - "android-project/**"
       - ".github/workflows/android-build.yml"
