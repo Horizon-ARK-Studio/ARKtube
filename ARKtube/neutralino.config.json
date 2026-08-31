@@ -7,16 +7,19 @@
   "documentRoot": "/resources/",
   "url": "https://www.youtube.com",
   "enableServer": true,
-  "enableNativeAPI": false,
+  "enableNativeAPI": true,
   "tokenSecurity": "one-time",
   "logging": {
     "enabled": true,
-    "writeToLogFile": true
+    "writeToLogFile": false
   },
   "nativeAllowList": [
     "app.exit",
     "app.killProcess",
-    "debug.log"
+    "debug.log",
+    "os.setTray",
+    "os.showMessageBox",
+    "events.broadcast"
   ],
   "modes": {
     "window": {
@@ -34,7 +37,10 @@
       "maximize": false,
       "hidden": false,
       "resizable": true,
-      "exitProcessOnClose": true
+      "exitProcessOnClose": false,
+      "injectGlobals": true,
+      "injectClientLibrary": true,
+      "injectScript": "/resources/js/app-init.js"
     },
     "browser": {
       "globalVariables": {
