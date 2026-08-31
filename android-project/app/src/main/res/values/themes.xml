@@ -38,7 +38,7 @@
       calls installSplashScreen() before super.onCreate(), which
       swaps this theme for postSplashScreenTheme once the WebView
       starts rendering. Icon source: mipmap/ic_launcher_foreground
-      (derived from the repo's appIcon.png -- see
+      (derived from the repo's appIcon.png, see
       mipmap-xxxhdpi/ic_launcher_foreground.png).
     -->
     <style name="Theme.ArkTubeApp.Starting" parent="Theme.SplashScreen">
