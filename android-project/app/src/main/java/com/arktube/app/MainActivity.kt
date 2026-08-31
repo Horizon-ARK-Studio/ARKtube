@@ -1,13 +1,17 @@
 package com.arktube.app
 
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 
 /**
@@ -67,6 +71,22 @@ class MainActivity : AppCompatActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
 
+        // Lets fullscreen video draw under the notch/camera cutout
+        // instead of YouTube's custom view being letterboxed around
+        // it. Must be set on the window's LayoutParams directly (not
+        // just the insets controller) or the cutout area stays
+        // reserved regardless of what onShowCustomView does later.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                    } else {
+                        WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                    }
+            }
+        }
+
         webView = WebView(this)
         setContentView(webView)
 
@@ -120,6 +140,15 @@ class MainActivity : AppCompatActivity() {
                 customView = view
                 customViewCallback = callback
                 setContentView(view)
+                enterImmersiveFullscreen()
+                // Custom view is the real fullscreen surface, not
+                // the WebView -- FLAG_KEEP_SCREEN_ON has to be on
+                // *this* window regardless of which view is
+                // currently attached as content, so it applies
+                // either way, but set it explicitly here so it's
+                // guaranteed on for the duration playback is in this
+                // native fullscreen view.
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 // Safety net: ZOOM_TO_FILL_JS should already be
                 // installed from onPageFinished, but this covers the
                 // (unlikely) case fullscreen was reached before that
@@ -133,6 +162,8 @@ class MainActivity : AppCompatActivity() {
                 customView = null
                 customViewCallback?.onCustomViewHidden()
                 customViewCallback = null
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                exitImmersiveFullscreen()
             }
         }
 
@@ -178,6 +209,33 @@ class MainActivity : AppCompatActivity() {
         val insetsController = WindowInsetsControllerCompat(window, window.decorView)
         insetsController.isAppearanceLightStatusBars = !isDark
         insetsController.isAppearanceLightNavigationBars = !isDark
+    }
+
+    /**
+     * Drops the status bar, nav bar, and (via the cutout mode set in
+     * onCreate) the notch/cutout inset -- entered only while
+     * YouTube's custom fullscreen view is showing, so browsing the
+     * rest of the site keeps normal system bars. `hide()` alone
+     * would still reserve the cutout's inset as blank space even
+     * with the bars gone; layoutInDisplayCutoutMode is what actually
+     * lets content draw underneath it. BEHAVIOR_SHOW_TRANSIENT_...
+     * means a swipe from the edge peeks the bars back temporarily
+     * (for the user to exit, adjust volume, etc.) without permanently
+     * exiting fullscreen the way SHOW_BARS_BY_TOUCH would.
+     */
+    private fun enterImmersiveFullscreen() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
+    /** Restores normal system bars when leaving fullscreen video. */
+    private fun exitImmersiveFullscreen() {
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.show(WindowInsetsCompat.Type.systemBars())
+        WindowCompat.setDecorFitsSystemWindows(window, true)
     }
 
     /**
