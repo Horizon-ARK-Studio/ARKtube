@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Unlike an assets-bundled WebView shell, ARKtube's whole point
+         (see the desktop app's docs/PROBLEM-STATEMENT.md) is to wrap
+         the *live* youtube.com/m.youtube.com in a native shell rather
+         than ship a bundled copy of it - so this needs real network
+         access, not just a local asset loader. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:name=".ArkTubeApplication"
+        android:allowBackup="true"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.ArkTubeApp">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="unspecified"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:theme="@style/Theme.ArkTubeApp.Starting">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
