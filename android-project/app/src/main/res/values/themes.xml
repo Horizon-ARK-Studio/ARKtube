@@ -37,12 +37,13 @@
       Applied to MainActivity in AndroidManifest.xml; MainActivity
       calls installSplashScreen() before super.onCreate(), which
       swaps this theme for postSplashScreenTheme once the WebView
-      starts rendering. Icon source: drawable/ic_launcher_foreground.xml
-      (a vector, so no raster splash asset is needed).
+      starts rendering. Icon source: mipmap/ic_launcher_foreground
+      (derived from the repo's appIcon.png -- see
+      mipmap-xxxhdpi/ic_launcher_foreground.png).
     -->
     <style name="Theme.ArkTubeApp.Starting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/splash_background</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
         <item name="postSplashScreenTheme">@style/Theme.ArkTubeApp</item>
     </style>
 </resources>

@@ -23,8 +23,8 @@
          back to a flat background color. -->
     <color name="ic_launcher_background">#0F0F0F</color>
 
-    <!-- Splash screen background, matching the launcher icon's dark
+    <!-- Splash screen background, matching appIcon.png's own red
          backdrop so the icon feels continuous between splash and app
          icon. See values/themes.xml's Theme.ArkTubeApp.Starting. -->
-    <color name="splash_background">#0F0F0F</color>
+    <color name="splash_background">#E60406</color>
 </resources>
