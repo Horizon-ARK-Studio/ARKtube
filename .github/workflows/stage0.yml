@@ -1,10 +1,7 @@
-name: Stage 0 - Feasibility Check
+name: Build AppImage
 
-# Boots the ARKtube Neutralino shell (per docs/PROBLEM-STATEMENT.md, Phase 0)
-# on a real, internet-connected runner, since youtube.com cannot be reached
-# from the sandboxed environment this was scaffolded in. Captures the
-# Neutralino log and a screenshot of the rendered window as artifacts so the
-# Stage 0 checklist in ARKtube/README.md can be evaluated from CI output.
+# Packages the ARKtube Neutralino shell into a Linux AppImage using the
+# prebuilt neutralino-linux_x64 binary and resources checked into the repo.
 
 on:
   push:
@@ -19,8 +16,8 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  stage0-linux:
-    name: Boot ARKtube (Linux, WebKitGTK)
+  build-appimage:
+    name: Build ARKtube AppImage (Linux x64)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -30,70 +27,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (WebKitGTK, Xvfb, screenshot tool)
+      - name: Install system dependencies (WebKitGTK, FUSE)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-0 \
-            xvfb \
-            imagemagick \
-            x11-apps
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Neutralino CLI
-        run: npm install -g @neutralinojs/neu
+            libfuse2
 
       - name: Make prebuilt binary executable
         run: chmod +x bin/neutralino-linux_x64
 
-      - name: Launch ARKtube under Xvfb and capture output
-        id: launch
+      - name: Assemble AppDir
         run: |
-          set -x
-          Xvfb :99 -screen 0 1280x800x24 &
-          XVFB_PID=$!
-          export DISPLAY=:99
-          sleep 2
+          set -e
+          APPDIR=AppDir
+          mkdir -p "$APPDIR/usr/bin"
 
-          # neu run starts the resource server + the native window, pointed
-          # at https://www.youtube.com per neutralino.config.json.
-          neu run --no-window-controls > neu-run.log 2>&1 &
-          NEU_PID=$!
+          cp bin/neutralino-linux_x64 "$APPDIR/usr/bin/ARKtube"
+          chmod +x "$APPDIR/usr/bin/ARKtube"
+          cp -r resources "$APPDIR/usr/bin/resources"
+          cp neutralino.config.json "$APPDIR/usr/bin/neutralino.config.json"
 
-          # Give the WebView time to request youtube.com and render.
-          sleep 20
+          cp resources/icons/appIcon.png "$APPDIR/ARKtube.png"
 
-          # Capture whatever is on the virtual display, regardless of
-          # whether the page fully loaded — this is the Stage 0 evidence.
-          import -window root screenshot.png || echo "screenshot capture failed" | tee -a neu-run.log
+          {
+            echo "[Desktop Entry]"
+            echo "Type=Application"
+            echo "Name=ARKtube"
+            echo "Exec=ARKtube"
+            echo "Icon=ARKtube"
+            echo "Categories=Network;AudioVideo;"
+            echo "Terminal=false"
+          } > "$APPDIR/ARKtube.desktop"
 
-          # Let it run a little longer so async errors/log lines land.
-          sleep 5
+          {
+            echo '#!/bin/sh'
+            echo 'HERE="$(dirname "$(readlink -f "$0")")"'
+            echo 'cd "$HERE/usr/bin"'
+            echo 'exec ./ARKtube "$@"'
+          } > "$APPDIR/AppRun"
+          chmod +x "$APPDIR/AppRun"
 
-          kill "$NEU_PID" 2>/dev/null || true
-          sleep 2
-          kill "$XVFB_PID" 2>/dev/null || true
-
-          echo "----- neu-run.log -----"
-          cat neu-run.log || true
-
-      - name: Locate Neutralino's own log file
-        if: always()
+      - name: Download appimagetool
         run: |
-          find . -iname "*.log" -newer neutralino.config.json -exec echo {} \; -exec cat {} \; || true
+          curl -L -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
 
-      - name: Upload Stage 0 artifacts
-        if: always()
+      - name: Build AppImage
+        run: ./appimagetool --appimage-extract-and-run AppDir ARKtube-x86_64.AppImage
+
+      - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stage0-output-linux
-          path: |
-            ARKtube/screenshot.png
-            ARKtube/neu-run.log
-            ARKtube/**/*.log
-          if-no-files-found: warn
+          name: ARKtube-x86_64-AppImage
+          path: ARKtube/ARKtube-x86_64.AppImage
+          if-no-files-found: error
           retention-days: 14
