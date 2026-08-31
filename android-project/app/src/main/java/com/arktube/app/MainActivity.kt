@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.SurfaceView
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -315,6 +317,13 @@ class MainActivity : AppCompatActivity() {
                 }
                 customView = view
                 customViewCallback = callback
+                // Must happen before this View is ever attached/drawn:
+                // see neutralizeSurfaceViewZOrder()'s own doc comment
+                // for why any SurfaceView buried inside it otherwise
+                // paints above every normal View in the window --
+                // including our own stretch-to-fill button -- no
+                // matter where that button sits in the layout.
+                neutralizeSurfaceViewZOrder(view)
                 val container = buildFullscreenContainer(view)
                 fullscreenContainer = container
                 // Added as a second child of rootLayout, on top of
@@ -331,6 +340,11 @@ class MainActivity : AppCompatActivity() {
                         FrameLayout.LayoutParams.MATCH_PARENT
                     )
                 )
+                // The stretch-to-fill button is deliberately *not* a
+                // child of `container` -- see attachStretchToggleButton()'s
+                // doc comment for why it's added straight to
+                // rootLayout as its own top-level sibling instead.
+                attachStretchToggleButton()
                 // Snapshot whatever orientation the activity was
                 // actually in right now, so exiting fullscreen snaps
                 // back to that -- not a hardcoded default -- even if
@@ -367,6 +381,7 @@ class MainActivity : AppCompatActivity() {
                 fullscreenContainer?.let { rootLayout.removeView(it) }
                 fullscreenContainer?.removeAllViews()
                 fullscreenContainer = null
+                stretchToggleButton?.let { rootLayout.removeView(it) }
                 stretchToggleButton = null
                 customView = null
                 customViewCallback?.onCustomViewHidden()
@@ -514,14 +529,17 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Wraps Chromium's raw fullscreen `video` view in a FrameLayout
-     * together with the stretch-to-fill toggle button, and wires up
-     * applyNativeZoomCrop() to recompute on every layout pass.
+     * on its own, and wires up applyNativeZoomCrop() to recompute on
+     * every layout pass.
      *
-     * The button is attached here (as a sibling overlay in the same
-     * container) rather than added to the WebView's own DOM, so it
-     * keeps working regardless of what the page's JS does and can't
-     * be hidden/removed by a YouTube layout change the way an
-     * injected in-page element could be.
+     * The stretch-to-fill button used to be added here too, as a
+     * sibling overlay inside this same container. That doesn't
+     * actually guarantee it draws (or receives touches) on top of
+     * `video`: see neutralizeSurfaceViewZOrder() for why a
+     * hardware-composited SurfaceView can paint above every normal
+     * View in the window regardless of sibling order, and
+     * attachStretchToggleButton() for where the button lives now
+     * instead.
      */
     private fun buildFullscreenContainer(video: android.view.View): FrameLayout {
         val container = FrameLayout(this)
@@ -553,6 +571,73 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
+        return container
+    }
+
+    /**
+     * Recursively strips any SurfaceView inside `root` of the
+     * z-order flags that let it paint above the rest of the window.
+     *
+     * This is the actual fix for the stretch-to-fill button (and any
+     * other native overlay) being invisible/untouchable once
+     * fullscreen video is on screen: Chromium's fullscreen customView
+     * is backed by a hardware-composited SurfaceView, and WebView
+     * commonly leaves setZOrderOnTop (sometimes setZOrderMediaOverlay)
+     * enabled on it for efficient video compositing. Either flag
+     * moves that SurfaceView's *actual* pixels into a system-level
+     * compositor layer that sits above the entire window's normal
+     * View hierarchy -- not just above `video`'s siblings in whatever
+     * container we put it in. Normal Android z-order (draw/add order
+     * within a ViewGroup) has no say over that layer at all, so no
+     * amount of rearranging our button in the layout could ever put
+     * it on top while the flag stayed set. This didn't show up before
+     * the crop because the video only ever covered part of the
+     * screen (letterboxed); now that force-fill/crop routinely makes
+     * it fill the whole screen, it sits in front of everything,
+     * including the very button meant to control it.
+     *
+     * Turning both flags off drops the SurfaceView back to its
+     * default "hole punch" compositing, drawn in the window's normal
+     * surface at its actual position in the View tree -- exactly
+     * where addView() put it, i.e. *below* the button added after it.
+     * That also restores normal View-hierarchy touch dispatch, which
+     * was never actually about the button (dispatch already followed
+     * add-order correctly) but effectively didn't matter while the
+     * button wasn't visibly reachable to tap in the first place.
+     *
+     * Must run before `root` is attached to the window -- the flags
+     * take effect based on the SurfaceView's state as its Surface is
+     * created, not continuously, so setting them post-attach can be a
+     * frame or two late.
+     */
+    private fun neutralizeSurfaceViewZOrder(root: android.view.View) {
+        if (root is SurfaceView) {
+            root.setZOrderOnTop(false)
+            root.setZOrderMediaOverlay(false)
+        }
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                neutralizeSurfaceViewZOrder(root.getChildAt(i))
+            }
+        }
+    }
+
+    /**
+     * Adds the stretch-to-fill toggle directly to rootLayout, as its
+     * own top-level sibling *above* fullscreenContainer -- not nested
+     * inside it.
+     *
+     * neutralizeSurfaceViewZOrder() is what actually makes this
+     * button paint/receive touches above the video (see its own doc
+     * comment); this placement is a second, independent guarantee on
+     * top of that: even if some future customView nests the button's
+     * container in a way that confuses normal draw order, adding the
+     * button as the *last* child of rootLayout itself -- the same
+     * root FrameLayout fullscreenContainer is a child of -- keeps it
+     * unambiguously topmost at the window's own top level, decoupled
+     * from whatever fullscreenContainer's internal contents do.
+     */
+    private fun attachStretchToggleButton() {
         val button = buildStretchToggleButton()
         stretchToggleButton = button
         val buttonSizePx = dpToPx(STRETCH_BUTTON_SIZE_DP)
@@ -565,9 +650,7 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.BOTTOM or Gravity.START
             setMargins(marginPx, marginPx, marginPx, marginPx)
         }
-        container.addView(button, buttonParams)
-
-        return container
+        rootLayout.addView(button, buttonParams)
     }
 
     /**
