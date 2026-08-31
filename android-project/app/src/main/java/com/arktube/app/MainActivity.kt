@@ -51,20 +51,30 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    the fullscreen button to do anything
  *  - zooms fullscreen video to fill the screen (cropping any
  *    letterbox/pillarbox bars) instead of leaving YouTube's default
- *    letterboxed "fit" framing -- see ZOOM_TO_FILL_JS below. Done via
- *    a CSS transform on the <video> paint layer only, specifically
- *    *not* by resizing its layout box: an earlier version forced the
- *    box itself to fill the screen, which desynced YouTube's own
- *    click-hit-testing math (computed against the box's real,
- *    unforced size) and upscaled the decoded frame well past its
- *    native resolution, which is what was showing up as "blurry and
- *    nothing's clickable." The scale itself is computed from the
- *    video's own intrinsic pixel size vs. its container, not the
- *    video element's rendered box -- YouTube's fullscreen CSS
- *    already stretches that box to fill the screen (object-fit:
- *    contain paints the real letterboxed picture *inside* it), so
- *    measuring the box directly is comparing screen size to screen
- *    size and never actually crops anything.
+ *    letterboxed "fit" framing -- see applyNativeZoomCrop() below.
+ *    Two earlier attempts at this (forcing the <video> element's
+ *    layout box to fill the screen, then a CSS transform scoped to
+ *    just its paint layer) both turned out to be fixing the wrong
+ *    layer entirely: once YouTube's player goes fullscreen, WebView
+ *    doesn't keep rendering a <video> through the normal DOM/CSS
+ *    pipeline at all -- it hands the app a separate native View via
+ *    WebChromeClient.onShowCustomView(), backed by its own
+ *    hardware-composited SurfaceView, entirely outside the page's
+ *    DOM. No CSS transform or object-fit rule reaches that surface,
+ *    which is why both earlier attempts visibly did nothing (or, in
+ *    the layout-box version, desynced YouTube's own click-hit-testing
+ *    math and upscaled the decoded frame past its native resolution --
+ *    "blurry and nothing's clickable"). The crop has to happen
+ *    natively instead, as View.scaleX/scaleY on the actual customView
+ *    Chromium handed us -- since the letterboxed picture (bars
+ *    included) is baked into that View's own paint, scaling the whole
+ *    View up uniformly crops the bars out the same way the CSS
+ *    transform was meant to, just on the layer that's really on
+ *    screen. The scale factor is still computed from the video's own
+ *    intrinsic pixel size (video.videoWidth/videoHeight, read via JS
+ *    since that's DOM-only information the native side has no other
+ *    way to see) versus the customView's native-measured size --
+ *    see the ArkTubeOrientation bridge and applyNativeZoomCrop().
  *  - goes truly edge-to-edge for fullscreen video: hides the status
  *    bar, nav bar (gesture pill or 3-button), and draws under the
  *    notch/camera cutout -- see enterImmersiveFullscreen()/
@@ -78,7 +88,7 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    auto-rotate lock the way the YouTube app does, and restoring
  *    whatever orientation preceded fullscreen once it ends -- see
  *    OrientationBridge/applyFullscreenOrientation() and the
- *    ArkTubeOrientation calls inside ZOOM_TO_FILL_JS
+ *    ArkTubeOrientation calls inside VIDEO_SIZE_REPORT_JS
  *  - keeps the status/nav bar color in sync with whichever theme
  *    YouTube itself is rendering (its own light/dark toggle, not the
  *    phone's system theme) -- see THEME_SYNC_JS and ThemeBridge below
@@ -86,12 +96,13 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    native YouTube app instead) since this app already *is* that
  *    experience wrapped natively -- see HIDE_OPEN_APP_JS below
  *  - offers a manual "stretch to fill" toggle over fullscreen video,
- *    since the automatic crop-to-fill in ZOOM_TO_FILL_JS only
+ *    since the automatic crop-to-fill in applyNativeZoomCrop() only
  *    engages itself when it measures real letterbox/pillarbox bars
  *    to crop -- there was previously no way for a user to *ask* for
  *    it, only for the code to decide on its own -- see
- *    buildStretchToggleButton()/toggleForceFill() and
- *    __arktubeSetForceFill in ZOOM_TO_FILL_JS
+ *    buildStretchToggleButton()/toggleForceFill(), both of which
+ *    just feed the forceFillEnabled field applyNativeZoomCrop()
+ *    itself reads
  *  - reasserts immersive mode on every window-focus regain while
  *    fullscreen video is showing (see onWindowFocusChanged), since
  *    Android silently redraws the system bars on any focus churn --
@@ -100,13 +111,14 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    sitting in front of the page is what was swallowing the tap
  *    meant for that menu (or its gear icon) instead of passing it
  *    through
- *  - pushes the fullscreen container's real, native-measured size to
- *    the page on every layout pass (rotation, insets settling) --
- *    see reportViewportToPage()/__arktubeSetViewport in
- *    ZOOM_TO_FILL_JS -- so the crop math has an immediately-current
- *    number to work from instead of racing window.innerWidth/
- *    getBoundingClientRect(), which can still reflect the outgoing
- *    orientation for a frame or two right after a rotation
+ *  - recomputes the native zoom-to-fill crop on every layout pass
+ *    (rotation, insets settling) against the customView's own
+ *    native-measured size -- see applyNativeZoomCrop() and where
+ *    it's called from buildFullscreenContainer()'s layout/insets
+ *    listeners -- so the crop always has an immediately-current
+ *    number to work from instead of racing a DOM measurement that
+ *    can still reflect the outgoing orientation for a frame or two
+ *    right after a rotation
  *
  * Explicitly out of scope for Stage 0 (future stages, see the
  * repo-root roadmap): a persistent nav shell/sidebar, download
@@ -143,6 +155,17 @@ class MainActivity : AppCompatActivity() {
     // onCreate) since it should snap back to whatever the user was
     // actually in immediately before, not a fixed default.
     private var preFullscreenOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+
+    // The fullscreen stream's own intrinsic pixel size, as last
+    // reported by VIDEO_SIZE_REPORT_JS via the ArkTubeOrientation
+    // bridge (see onFullscreenVideoSize below). This is DOM-only
+    // information -- video.videoWidth/videoHeight -- that native code
+    // has no other way to observe, so JS is still the source for it;
+    // everything downstream of it (the actual crop) is native. Reset
+    // to 0 whenever fullscreen exits so a stale size can't leak into
+    // the next session before its own first report arrives.
+    private var lastVideoWidth = 0
+    private var lastVideoHeight = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Must be called before super.onCreate() -- swaps
@@ -242,34 +265,32 @@ class MainActivity : AppCompatActivity() {
         // to reach Kotlin). "ArkTubeTheme" here is exactly the global
         // name THEME_SYNC_JS calls as window.ArkTubeTheme.
         webView.addJavascriptInterface(ThemeBridge(), "ArkTubeTheme")
-        // Lets ZOOM_TO_FILL_JS hand the fullscreen stream's own
+        // Lets VIDEO_SIZE_REPORT_JS hand the fullscreen stream's own
         // intrinsic width/height back to native code, so the
         // fullscreen orientation can follow the *video's* shape
         // (landscape video -> landscape, portrait/Shorts -> portrait)
         // the way the YouTube app does, rather than just whatever
-        // the phone happens to be held as.
+        // the phone happens to be held as -- and so the native
+        // zoom-to-fill crop in applyNativeZoomCrop() has the video's
+        // intrinsic size to work from.
         webView.addJavascriptInterface(OrientationBridge(), "ArkTubeOrientation")
 
         webView.webViewClient = object : WebViewClient() {
             // YouTube's fullscreen button doesn't hand the WebView a
             // bare <video>; it puts the player into the page's own
-            // Fullscreen API and WebChromeClient.onShowCustomView
-            // just mirrors that DOM state natively. So the "fit"
-            // vs. "fill" framing is still ultimately CSS, and we can
-            // reapply it here on every page load so it's already in
-            // place by the time the fullscreen button is tapped.
+            // Fullscreen API, and WebChromeClient.onShowCustomView
+            // mirrors that DOM state natively by handing over a
+            // separate customView. The "fit" vs. "fill" framing
+            // itself is applied natively (applyNativeZoomCrop()) once
+            // that customView exists -- all this JS still needs to do
+            // is keep reporting the video's own intrinsic size, so we
+            // reinstall it here on every page load, ready before the
+            // fullscreen button is ever tapped.
             override fun onPageFinished(view: WebView, url: String?) {
                 super.onPageFinished(view, url)
-                view.evaluateJavascript(ZOOM_TO_FILL_JS, null)
+                view.evaluateJavascript(VIDEO_SIZE_REPORT_JS, null)
                 view.evaluateJavascript(THEME_SYNC_JS, null)
                 view.evaluateJavascript(HIDE_OPEN_APP_JS, null)
-                // A real (non-SPA) navigation gives YouTube a brand
-                // new JS context, which resets ZOOM_TO_FILL_JS's
-                // in-memory forceFill flag to its own default
-                // (false) -- reassert whatever the user actually
-                // last chose so the toggle sticks across navigation,
-                // not just within one page's lifetime.
-                applyForceFillPreference()
             }
         }
         webView.webChromeClient = object : WebChromeClient() {
@@ -318,17 +339,21 @@ class MainActivity : AppCompatActivity() {
                 // guaranteed on for the duration playback is in this
                 // native fullscreen view.
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                // Safety net: ZOOM_TO_FILL_JS should already be
+                // Safety net: VIDEO_SIZE_REPORT_JS should already be
                 // installed from onPageFinished, but this covers the
                 // (unlikely) case fullscreen was reached before that
                 // fired. Harmless to call again either way -- it's
                 // guarded against installing its listeners twice.
-                webView.evaluateJavascript(ZOOM_TO_FILL_JS, null)
-                // Re-assert the persisted stretch-to-fill choice into
-                // this fullscreen session (see the onPageFinished
-                // comment above for why the JS-side flag can't be
-                // trusted to have survived on its own).
-                applyForceFillPreference()
+                webView.evaluateJavascript(VIDEO_SIZE_REPORT_JS, null)
+                // customView hasn't been laid out yet at this exact
+                // point (width/height are still 0), so this mostly
+                // no-ops here -- the real first crop application
+                // happens off the container's own first global-layout
+                // pass, or off the video-size report if that arrives
+                // second. Calling it here too just covers the case
+                // both already have stale data from a previous
+                // session's fields.
+                applyNativeZoomCrop()
             }
 
             override fun onHideCustomView() {
@@ -339,6 +364,8 @@ class MainActivity : AppCompatActivity() {
                 customView = null
                 customViewCallback?.onCustomViewHidden()
                 customViewCallback = null
+                lastVideoWidth = 0
+                lastVideoHeight = 0
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 exitImmersiveFullscreen()
                 requestedOrientation = preFullscreenOrientation
@@ -386,7 +413,7 @@ class MainActivity : AppCompatActivity() {
     /**
      * Wraps Chromium's raw fullscreen `video` view in a FrameLayout
      * together with the stretch-to-fill toggle button, and wires up
-     * native viewport reporting for it.
+     * applyNativeZoomCrop() to recompute on every layout pass.
      *
      * The button is attached here (as a sibling overlay in the same
      * container) rather than added to the WebView's own DOM, so it
@@ -404,21 +431,23 @@ class MainActivity : AppCompatActivity() {
             )
         )
 
-        // Reports the container's real, native-measured pixel size
-        // to the page on every layout pass -- rotation, and system
-        // bar/insets changes as immersive mode settles in or a swipe
-        // temporarily peeks the bars back. This is the authoritative
-        // number ZOOM_TO_FILL_JS should crop against: the DOM's own
-        // getBoundingClientRect()/window.innerWidth can still be
-        // reporting the *previous* orientation's numbers for a frame
-        // or two right after a rotation, which is what let the crop
-        // look right in portrait and come out wrong (or not apply at
-        // all) after rotating to landscape, or vice versa.
+        // Recomputes the native zoom-to-fill crop on every layout
+        // pass -- rotation, and system bar/insets changes as
+        // immersive mode settles in or a swipe temporarily peeks the
+        // bars back. applyNativeZoomCrop() reads the customView's own
+        // native-measured width/height directly (no DOM round-trip),
+        // which is the authoritative, immediately-current number: a
+        // DOM measurement like getBoundingClientRect()/
+        // window.innerWidth can still report the *previous*
+        // orientation's numbers for a frame or two right after a
+        // rotation, which is what let the crop look right in portrait
+        // and come out wrong (or not apply at all) after rotating to
+        // landscape, or vice versa.
         container.viewTreeObserver.addOnGlobalLayoutListener {
-            reportViewportToPage(container.width, container.height)
+            applyNativeZoomCrop()
         }
-        ViewCompat.setOnApplyWindowInsetsListener(container) { v, insets ->
-            reportViewportToPage(v.width, v.height)
+        ViewCompat.setOnApplyWindowInsetsListener(container) { _, insets ->
+            applyNativeZoomCrop()
             insets
         }
 
@@ -442,14 +471,14 @@ class MainActivity : AppCompatActivity() {
     /**
      * Builds the manual stretch-to-fill toggle.
      *
-     * ZOOM_TO_FILL_JS's crop is entirely automatic: it only engages
-     * itself once it measures real letterbox/pillarbox bars to crop
-     * away, and otherwise leaves the frame alone. That logic can be
-     * completely correct and still feel like "stretch to fill doesn't
-     * work" if there was never actually a UI element for a user to
-     * ask for it from -- this button is that missing trigger, exposed
-     * as a small persistent overlay for the duration of fullscreen
-     * rather than something buried in a menu.
+     * applyNativeZoomCrop()'s crop is entirely automatic: it only
+     * engages itself once it measures real letterbox/pillarbox bars
+     * to crop away, and otherwise leaves the frame alone. That logic
+     * can be completely correct and still feel like "stretch to fill
+     * doesn't work" if there was never actually a UI element for a
+     * user to ask for it from -- this button is that missing trigger,
+     * exposed as a small persistent overlay for the duration of
+     * fullscreen rather than something buried in a menu.
      */
     private fun buildStretchToggleButton(): Button {
         val button = Button(this)
@@ -469,7 +498,11 @@ class MainActivity : AppCompatActivity() {
     private fun toggleForceFill() {
         forceFillEnabled = !forceFillEnabled
         prefs.edit().putBoolean(PREF_FORCE_FILL, forceFillEnabled).apply()
-        applyForceFillPreference()
+        // forceFillEnabled is read directly by applyNativeZoomCrop()
+        // (it's a plain field on this Activity, not something that
+        // has to cross the JS bridge) -- just recompute the crop with
+        // the new value in effect.
+        applyNativeZoomCrop()
         stretchToggleButton?.let { updateStretchButtonAppearance(it) }
     }
 
@@ -478,29 +511,70 @@ class MainActivity : AppCompatActivity() {
         button.alpha = if (forceFillEnabled) 1f else 0.6f
     }
 
-    /** Pushes the current persisted stretch-to-fill choice into the page's JS. */
-    private fun applyForceFillPreference() {
-        val enabledJs = if (forceFillEnabled) "true" else "false"
-        webView.evaluateJavascript(
-            "window.__arktubeSetForceFill && window.__arktubeSetForceFill($enabledJs);",
-            null
-        )
-    }
-
     /**
-     * Hands the fullscreen container's real size (in CSS px, i.e.
-     * divided by density the same way the page's own `window.innerWidth`
-     * would be) to ZOOM_TO_FILL_JS via __arktubeSetViewport.
+     * The actual zoom-to-fill crop: scales the native customView
+     * Chromium handed us in onShowCustomView up around its own
+     * center until its short axis matches the fullscreen container,
+     * cropping away whatever letterbox/pillarbox bars YouTube's
+     * player painted into that View. This -- View.scaleX/scaleY on
+     * the real on-screen View -- is the fix; see the onCreate class
+     * doc and onShowCustomView's own comments for why a CSS
+     * transform on the page's <video> element (tried previously)
+     * never touches this layer at all.
+     *
+     * Safe to call at any time, including well outside fullscreen or
+     * before either the container has been laid out or a video size
+     * has been reported yet -- it no-ops until both are available,
+     * and is deliberately called from several different triggers
+     * (onShowCustomView, every layout/insets pass, every new video
+     * size report, and the manual force-fill toggle) since any one of
+     * them can be the one that's actually ready first.
      */
-    private fun reportViewportToPage(widthPx: Int, heightPx: Int) {
-        if (widthPx <= 0 || heightPx <= 0) return
-        val density = resources.displayMetrics.density
-        val widthCss = widthPx / density
-        val heightCss = heightPx / density
-        webView.evaluateJavascript(
-            "window.__arktubeSetViewport && window.__arktubeSetViewport($widthCss, $heightCss);",
-            null
-        )
+    private fun applyNativeZoomCrop() {
+        val view = customView ?: return
+        if (lastVideoWidth <= 0 || lastVideoHeight <= 0) return
+        val containerW = view.width
+        val containerH = view.height
+        if (containerW <= 0 || containerH <= 0) return
+
+        val videoAspect = lastVideoWidth.toFloat() / lastVideoHeight.toFloat()
+        val containerAspect = containerW.toFloat() / containerH.toFloat()
+
+        // Size the picture is actually being painted at under
+        // whatever "fit" framing YouTube's player used (the
+        // letterboxed/pillarboxed rect), then scale up so its short
+        // side matches the container -- a crop-to-fill, computed
+        // from the stream's own intrinsic pixel size vs. the
+        // container's real native-measured size, not any DOM box.
+        val fittedW: Float
+        val fittedH: Float
+        if (videoAspect > containerAspect) {
+            fittedW = containerW.toFloat()
+            fittedH = containerW / videoAspect
+        } else {
+            fittedH = containerH.toFloat()
+            fittedW = containerH * videoAspect
+        }
+        if (fittedW <= 0f || fittedH <= 0f) return
+
+        val scale = maxOf(containerW / fittedW, containerH / fittedH)
+
+        // forceFillEnabled lowers the no-op threshold from
+        // "letterbox big enough to bother cropping" down to
+        // "basically any letterbox at all", so an explicit user
+        // request still does something even for an aspect ratio
+        // that's a near-exact match already.
+        val threshold = if (forceFillEnabled) 1.001f else 1.01f
+        if (!scale.isFinite() || scale <= threshold) {
+            view.scaleX = 1f
+            view.scaleY = 1f
+            return
+        }
+
+        view.pivotX = containerW / 2f
+        view.pivotY = containerH / 2f
+        view.scaleX = scale
+        view.scaleY = scale
     }
 
     private fun dpToPx(dp: Int): Int = TypedValue.applyDimension(
@@ -523,15 +597,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Receives the fullscreen stream's intrinsic width/height from
-    // ZOOM_TO_FILL_JS so the activity can rotate to match it, the
-    // way the YouTube app does -- a landscape upload gets a
+    // VIDEO_SIZE_REPORT_JS -- the one piece of this whole feature
+    // that genuinely has to come from JS, since video.videoWidth/
+    // videoHeight is DOM-only information native code can't observe
+    // any other way. Everything downstream of it is native: used
+    // both to rotate the activity to match the video's own shape (the
+    // way the YouTube app does -- landscape upload gets a
     // landscape-locked fullscreen even if you entered fullscreen
     // holding the phone upright, and vice versa for Shorts/portrait
-    // video.
+    // video) and to drive the native zoom-to-fill crop in
+    // applyNativeZoomCrop().
     private inner class OrientationBridge {
         @JavascriptInterface
         fun onFullscreenVideoSize(width: Int, height: Int) {
-            runOnUiThread { applyFullscreenOrientation(width, height) }
+            runOnUiThread {
+                lastVideoWidth = width
+                lastVideoHeight = height
+                applyFullscreenOrientation(width, height)
+                applyNativeZoomCrop()
+            }
         }
     }
 
@@ -642,39 +726,37 @@ class MainActivity : AppCompatActivity() {
         private const val STRETCH_BUTTON_MARGIN_DP = 16
         private const val STRETCH_BUTTON_BG_COLOR = 0x66000000 // translucent black
 
-        // Crops fullscreen video to fill the screen instead of
-        // YouTube's default letterboxed "fit".
+        // Reports the fullscreen stream's own intrinsic pixel size
+        // (video.videoWidth/videoHeight) to native code
+        // (ArkTubeOrientation) whenever it changes. This is *all*
+        // this JS does now -- it no longer attempts to crop anything
+        // itself.
         //
-        // The old version measured the <video> element's own
-        // getBoundingClientRect() and compared *that* box to
-        // window.innerWidth/innerHeight. That's the wrong thing to
-        // measure: YouTube's fullscreen CSS already stretches the
-        // <video> element's *box* to fill the whole screen (with
-        // object-fit: contain painting the actual letterboxed/
-        // pillarboxed picture *inside* that box) -- so the box was
-        // already ~screen-sized, the computed scale came out to
-        // ~1.0, and the "zoom to fill" was a no-op. What actually
-        // determines how much letterbox padding is being painted is
-        // the *stream's own* intrinsic pixel size (video.videoWidth
-        // / videoHeight) versus the size of the box it's being fit
-        // into -- so that's what's measured now.
+        // An earlier version tried to do the actual zoom-to-fill crop
+        // right here, via a CSS transform on the <video> element. It
+        // never worked on a real device: once YouTube's player goes
+        // fullscreen, WebView promotes it out of the DOM entirely
+        // onto WebChromeClient's customView -- a separate,
+        // hardware-composited native View/SurfaceView that this page's
+        // CSS has no way to reach at all. Styling <video> here was
+        // styling a DOM node that, from that point on, isn't what's
+        // actually on screen -- so the transform was silently inert
+        // regardless of how correct its math was. (A version before
+        // that tried resizing the <video> element's own layout box
+        // instead of just its paint layer, which does affect what's
+        // on screen in *non*-fullscreen playback, but for the same
+        // reason has no effect once fullscreen hands rendering off to
+        // customView either.)
         //
-        // Scoped to *only* a CSS transform on the <video> -- never
-        // its layout box (width/height/object-fit) -- since
-        // YouTube's own controls read the video's real box size to
-        // position/hit-test themselves; a transform changes what's
-        // painted (and, correctly, what taps land on) without
-        // touching that box at all, so the controls stay exactly
-        // where YouTube put them.
-        //
-        // Also reports the stream's intrinsic width/height to native
-        // (ArkTubeOrientation) so the fullscreen orientation can
-        // follow the video's own shape, YouTube-app-style, rather
-        // than the phone's.
+        // The crop itself now lives entirely in Kotlin -- see
+        // applyNativeZoomCrop() -- as View.scaleX/scaleY on the real
+        // customView. video.videoWidth/videoHeight is the one piece
+        // of that math this JS still has to supply, since it's
+        // DOM-only information with no native equivalent.
         //
         // Re-evaluates on fullscreenchange, on resize (covers
-        // rotation), loadedmetadata (covers autoplay-next swapping
-        // in a differently-shaped video, and covers videoWidth/
+        // rotation), loadedmetadata (covers autoplay-next swapping in
+        // a differently-shaped video, and covers videoWidth/
         // videoHeight simply not being known yet at the moment
         // fullscreen is entered), and a couple of short delayed
         // retries after entering fullscreen since YouTube sometimes
@@ -682,46 +764,13 @@ class MainActivity : AppCompatActivity() {
         // transition itself. Guarded by a flag on `window` so
         // re-injecting this on every onPageFinished doesn't register
         // duplicate listeners within the same page's JS context.
-        private const val ZOOM_TO_FILL_JS = """
+        private const val VIDEO_SIZE_REPORT_JS = """
             (function() {
-                if (window.__arktubeZoomToFillInstalled) { return; }
-                window.__arktubeZoomToFillInstalled = true;
+                if (window.__arktubeVideoSizeReportInstalled) { return; }
+                window.__arktubeVideoSizeReportInstalled = true;
 
-                var zoomedVideo = null;
                 var lastReportedW = 0;
                 var lastReportedH = 0;
-
-                // Manual override, driven by the native
-                // stretch-to-fill button -- see
-                // buildStretchToggleButton()/toggleForceFill() in
-                // MainActivity.kt. Lets a user force the crop even
-                // when the automatic measurement below wouldn't have
-                // applied one on its own (e.g. an aspect ratio close
-                // enough to the container that it fell under the
-                // no-op threshold).
-                var forceFill = false;
-                window.__arktubeSetForceFill = function(enabled) {
-                    forceFill = !!enabled;
-                    scheduleApplyZoom();
-                };
-
-                // Native's own measurement of the fullscreen
-                // container, in CSS px -- pushed on every layout pass
-                // (rotation, insets settling) via
-                // reportViewportToPage()/__arktubeSetViewport in
-                // MainActivity.kt. Preferred over
-                // getBoundingClientRect()/window.innerWidth below
-                // when available, since those can still be reporting
-                // the outgoing orientation's numbers for a frame or
-                // two right after a rotation -- which is what let
-                // this look right in portrait and silently fail (or
-                // crop against stale numbers) in landscape.
-                var nativeViewport = null;
-                window.__arktubeSetViewport = function(widthCss, heightCss) {
-                    if (!widthCss || !heightCss) { return; }
-                    nativeViewport = { width: widthCss, height: heightCss };
-                    scheduleApplyZoom();
-                };
 
                 function fullscreenVideo() {
                     var el = document.fullscreenElement || document.webkitFullscreenElement;
@@ -729,28 +778,8 @@ class MainActivity : AppCompatActivity() {
                     return el.tagName === 'VIDEO' ? el : el.querySelector('video');
                 }
 
-                function clearZoom(video) {
-                    if (!video) { return; }
-                    video.style.transform = '';
-                    video.style.transformOrigin = '';
-                }
-
-                function reportOrientation(videoW, videoH) {
-                    if (!window.ArkTubeOrientation) { return; }
-                    if (videoW === lastReportedW && videoH === lastReportedH) { return; }
-                    lastReportedW = videoW;
-                    lastReportedH = videoH;
-                    window.ArkTubeOrientation.onFullscreenVideoSize(videoW, videoH);
-                }
-
-                function applyZoom() {
+                function reportSize() {
                     var video = fullscreenVideo();
-                    if (zoomedVideo && zoomedVideo !== video) {
-                        clearZoom(zoomedVideo);
-                        lastReportedW = 0;
-                        lastReportedH = 0;
-                    }
-                    zoomedVideo = video;
                     if (!video) { return; }
 
                     // Intrinsic size of the decoded frame -- not the
@@ -759,74 +788,37 @@ class MainActivity : AppCompatActivity() {
                     var videoW = video.videoWidth;
                     var videoH = video.videoHeight;
                     if (!videoW || !videoH) { return; }
-
-                    reportOrientation(videoW, videoH);
-
-                    // The box that actually constrains the painted
-                    // picture: the fullscreen element itself, not
-                    // necessarily the <video>'s own box.
-                    var container = document.fullscreenElement || document.webkitFullscreenElement || video;
-                    var crect = container.getBoundingClientRect();
-                    // nativeViewport first (see the comment where
-                    // it's declared above); crect/window.inner* are
-                    // just the fallback for before native's first
-                    // layout pass has reported in.
-                    var containerW = (nativeViewport && nativeViewport.width) || crect.width || window.innerWidth;
-                    var containerH = (nativeViewport && nativeViewport.height) || crect.height || window.innerHeight;
-                    if (!containerW || !containerH) { return; }
-
-                    var videoAspect = videoW / videoH;
-                    var containerAspect = containerW / containerH;
-
-                    // Size the picture is actually being painted at
-                    // under object-fit: contain (the letterboxed/
-                    // pillarboxed rect), then scale up so its short
-                    // side matches the container -- object-fit:
-                    // cover, effectively, done via transform instead
-                    // of object-fit so hit-testing math is untouched.
-                    var fittedW, fittedH;
-                    if (videoAspect > containerAspect) {
-                        fittedW = containerW;
-                        fittedH = containerW / videoAspect;
-                    } else {
-                        fittedH = containerH;
-                        fittedW = containerH * videoAspect;
+                    if (videoW === lastReportedW && videoH === lastReportedH) { return; }
+                    lastReportedW = videoW;
+                    lastReportedH = videoH;
+                    if (window.ArkTubeOrientation) {
+                        window.ArkTubeOrientation.onFullscreenVideoSize(videoW, videoH);
                     }
-
-                    var scale = Math.max(containerW / fittedW, containerH / fittedH);
-
-                    // forceFill lowers the no-op threshold from
-                    // "letterbox big enough to bother cropping" down
-                    // to "basically any letterbox at all", so an
-                    // explicit user request still does something
-                    // even for an aspect ratio that's a near-exact
-                    // match already.
-                    var threshold = forceFill ? 1.001 : 1.01;
-                    if (!isFinite(scale) || scale <= threshold) {
-                        clearZoom(video);
-                        return;
-                    }
-
-                    video.style.transformOrigin = 'center center';
-                    video.style.transform = 'scale(' + scale.toFixed(4) + ')';
                 }
 
                 var pending = false;
-                function scheduleApplyZoom() {
+                function scheduleReportSize() {
                     if (pending) { return; }
                     pending = true;
                     requestAnimationFrame(function() {
                         pending = false;
-                        applyZoom();
+                        reportSize();
                     });
                 }
 
-                document.addEventListener('fullscreenchange', scheduleApplyZoom);
-                document.addEventListener('webkitfullscreenchange', scheduleApplyZoom);
-                window.addEventListener('resize', scheduleApplyZoom);
+                document.addEventListener('fullscreenchange', scheduleReportSize);
+                document.addEventListener('webkitfullscreenchange', scheduleReportSize);
+                window.addEventListener('resize', scheduleReportSize);
                 document.addEventListener('fullscreenchange', function() {
-                    setTimeout(scheduleApplyZoom, 300);
-                    setTimeout(scheduleApplyZoom, 1000);
+                    // A fresh fullscreen session (even for the same
+                    // video src, e.g. re-entering fullscreen) should
+                    // re-report once its size is known again, not
+                    // stay deduped against whatever the previous
+                    // session last reported.
+                    lastReportedW = 0;
+                    lastReportedH = 0;
+                    setTimeout(scheduleReportSize, 300);
+                    setTimeout(scheduleReportSize, 1000);
                 });
                 // 'loadedmetadata' is when videoWidth/videoHeight
                 // first become non-zero, and fires again if YouTube
@@ -834,7 +826,7 @@ class MainActivity : AppCompatActivity() {
                 // a fresh fullscreenchange event.
                 document.addEventListener('loadedmetadata', function(e) {
                     if (e.target === fullscreenVideo()) {
-                        scheduleApplyZoom();
+                        scheduleReportSize();
                     }
                 }, true);
             })();
