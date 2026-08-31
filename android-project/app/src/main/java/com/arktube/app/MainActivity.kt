@@ -1,6 +1,7 @@
 package com.arktube.app
 
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -119,6 +120,12 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    number to work from instead of racing a DOM measurement that
  *    can still reflect the outgoing orientation for a frame or two
  *    right after a rotation
+ *  - forces the *normal* (non-fullscreen) page to re-sync any
+ *    already-rendered off-screen content -- most visibly the "Up
+ *    next"/related-videos row -- to the WebView's real width after a
+ *    rotation, instead of leaving it stuck at the pre-rotation width
+ *    until the user happens to scroll it into view -- see
+ *    onConfigurationChanged()/forceLayoutReflow()
  *
  * Explicitly out of scope for Stage 0 (future stages, see the
  * repo-root roadmap): a persistent nav shell/sidebar, download
@@ -385,6 +392,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Handles rotation for the *normal* (non-fullscreen) page.
+     *
+     * AndroidManifest.xml declares
+     * `android:configChanges="orientation|screenSize|keyboardHidden"`
+     * on this Activity specifically so a rotation doesn't tear down
+     * and recreate it (which would reload the WebView from scratch,
+     * losing scroll position and briefly flashing a blank page) --
+     * but that also means nothing else runs automatically on
+     * rotation unless it's hooked here. Android still resizes
+     * webView/rootLayout's own views correctly on its own (they're
+     * MATCH_PARENT), and WebView's base View class already forwards
+     * that resize down into Chromium -- so *visible*, currently
+     * on-screen content reflows to the new width fine without any of
+     * this. What doesn't reflow on its own is content that was
+     * already rendered *off-screen* before the rotation (most
+     * visibly: further rows of "Up next"/related videos below the
+     * fold) -- it stays laid out at the stale pre-rotation width
+     * until the user manually scrolls it into view, at which point
+     * it snaps to the correct width. See forceLayoutReflow() for why
+     * and how that's worked around; this override just makes sure it
+     * actually runs on every rotation, not just the ones that happen
+     * to coincide with something else already touching the page.
+     */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        forceLayoutReflow()
+    }
+
+    /**
      * Reasserts immersive fullscreen every time the window regains
      * focus while fullscreen video is showing.
      *
@@ -407,6 +443,72 @@ class MainActivity : AppCompatActivity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus && customView != null) {
             enterImmersiveFullscreen()
+        }
+    }
+
+    /**
+     * Forces YouTube's own page JS to re-sync off-screen list items
+     * (most visibly the "Up next"/related-videos row) to the
+     * WebView's real, current width after a rotation.
+     *
+     * The bug this works around: a real browser window firing a
+     * resize continuously dispatches DOM 'resize' (and
+     * 'orientationchange') events as it happens, which is what
+     * YouTube's own mobile web layout listens for to know when to
+     * recompute anything it's deferred -- including re-measuring
+     * list items it previously decided not to bother laying out
+     * because they were off-screen (a legitimate perf optimization on
+     * their end, not a bug in their code). Android's WebView, when
+     * *its own View* is resized by the framework (as happens here
+     * via rootLayout/webView both being MATCH_PARENT, so a config
+     * change just resizes them in place), does correctly forward the
+     * new size into Chromium's layout engine -- but doesn't reliably
+     * guarantee those specific 'resize'/'orientationchange' DOM
+     * events fire for page JS the way an actual browser window resize
+     * does. So the visible viewport reflows correctly (Chromium's own
+     * layout knows the truth), but page JS that's specifically
+     * listening for those events to decide when to re-measure
+     * something never gets told to -- which is exactly the "stuck at
+     * the old width until you scroll" symptom: scrolling works
+     * because it fires its own event (a 'scroll'/intersection
+     * callback) that happens to trigger the same re-measurement path.
+     *
+     * Two-part fix, so either path YouTube's own code might be
+     * listening on gets covered:
+     *  1. Explicitly dispatch synthetic 'resize' and
+     *     'orientationchange' events on `window`.
+     *  2. Nudge the WebView's own scroll position by a pixel and
+     *     immediately back. This is the same trigger scrolling does
+     *     manually (per the observed bug), and is a deliberate
+     *     belt-and-braces alongside (1): if YouTube's related-videos
+     *     row happens to be driven by an IntersectionObserver or
+     *     scroll listener instead of (or in addition to) a resize
+     *     listener, this covers that path too, without requiring a
+     *     real user gesture.
+     *
+     * Run at a few short delays rather than once: rotation, inset
+     * changes (status/nav bar re-layout), and WebView's own internal
+     * resize don't necessarily all finish landing in the same frame,
+     * so a single immediate call can fire before Chromium has
+     * actually finished laying out the new size -- the delayed
+     * follow-ups catch that.
+     *
+     * No-ops during fullscreen video: the customView's own
+     * orientation/crop handling (applyFullscreenOrientation()/
+     * applyNativeZoomCrop()) already owns rotation while it's
+     * showing, and scrolling the WebView underneath it would be
+     * pointless (it's fully covered) as well as pointing scroll
+     * position at content the user isn't looking at.
+     */
+    private fun forceLayoutReflow() {
+        if (customView != null) return
+        for (delayMs in REFLOW_RETRY_DELAYS_MS) {
+            webView.postDelayed({
+                if (customView != null) return@postDelayed
+                webView.evaluateJavascript(FORCE_REFLOW_JS, null)
+                webView.scrollBy(0, 1)
+                webView.scrollBy(0, -1)
+            }, delayMs)
         }
     }
 
@@ -725,6 +827,28 @@ class MainActivity : AppCompatActivity() {
         private const val STRETCH_BUTTON_SIZE_DP = 40
         private const val STRETCH_BUTTON_MARGIN_DP = 16
         private const val STRETCH_BUTTON_BG_COLOR = 0x66000000 // translucent black
+
+        // Retry schedule for forceLayoutReflow() -- see its own doc
+        // comment for why a single immediate call isn't enough
+        // (rotation/inset settling can still be in progress).
+        private val REFLOW_RETRY_DELAYS_MS = longArrayOf(0L, 150L, 400L)
+
+        // Dispatches synthetic resize/orientationchange events so any
+        // of YouTube's own listeners for those *specific* DOM events
+        // fire, even though the WebView's own resize (a real, correct
+        // Chromium layout change) doesn't reliably trigger them the
+        // way an actual browser window resize would. See
+        // forceLayoutReflow()'s doc comment in MainActivity.kt for
+        // the full explanation -- the small scroll nudge that's the
+        // other half of that fix happens natively (webView.scrollBy),
+        // not here, since it needs to move the *Android* View's
+        // scroll position, not just fire a page-side event.
+        private const val FORCE_REFLOW_JS = """
+            (function() {
+                window.dispatchEvent(new Event('resize'));
+                window.dispatchEvent(new Event('orientationchange'));
+            })();
+        """
 
         // Reports the fullscreen stream's own intrinsic pixel size
         // (video.videoWidth/videoHeight) to native code
