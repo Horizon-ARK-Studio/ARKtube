@@ -45,7 +45,27 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    click-hit-testing math (computed against the box's real,
  *    unforced size) and upscaled the decoded frame well past its
  *    native resolution, which is what was showing up as "blurry and
- *    nothing's clickable."
+ *    nothing's clickable." The scale itself is computed from the
+ *    video's own intrinsic pixel size vs. its container, not the
+ *    video element's rendered box -- YouTube's fullscreen CSS
+ *    already stretches that box to fill the screen (object-fit:
+ *    contain paints the real letterboxed picture *inside* it), so
+ *    measuring the box directly is comparing screen size to screen
+ *    size and never actually crops anything.
+ *  - goes truly edge-to-edge for fullscreen video: hides the status
+ *    bar, nav bar (gesture pill or 3-button), and draws under the
+ *    notch/camera cutout -- see enterImmersiveFullscreen()/
+ *    exitImmersiveFullscreen() and the layoutInDisplayCutoutMode
+ *    setup in onCreate()
+ *  - keeps the screen from sleeping/locking while fullscreen video is
+ *    on screen (FLAG_KEEP_SCREEN_ON, toggled in on/onHideCustomView)
+ *  - rotates fullscreen video to match the video's own orientation --
+ *    landscape upload gets a landscape-locked fullscreen, portrait/
+ *    Shorts gets portrait -- overriding the phone's system
+ *    auto-rotate lock the way the YouTube app does, and restoring
+ *    whatever orientation preceded fullscreen once it ends -- see
+ *    OrientationBridge/applyFullscreenOrientation() and the
+ *    ArkTubeOrientation calls inside ZOOM_TO_FILL_JS
  *  - keeps the status/nav bar color in sync with whichever theme
  *    YouTube itself is rendering (its own light/dark toggle, not the
  *    phone's system theme) -- see THEME_SYNC_JS and ThemeBridge below

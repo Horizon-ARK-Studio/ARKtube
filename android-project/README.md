@@ -18,7 +18,30 @@ the command line once you have a JDK:
   folder and no `WebViewAssetLoader` here — ARKtube's whole point is
   to wrap the *live* site, not ship a copy of it, so this needs the
   `INTERNET` permission (declared in `AndroidManifest.xml`) rather
-  than local asset serving.
+  than local asset serving. Beyond just loading the site, it also:
+  - Crops fullscreen video to fill the screen instead of YouTube's
+    letterboxed default, by comparing the video's own intrinsic
+    pixel size to its container and scaling with a CSS transform
+    (never touching the layout box YouTube's own controls hit-test
+    against).
+  - Goes truly edge-to-edge in fullscreen — hides the status bar,
+    nav bar (gesture pill or 3-button), *and* draws under the
+    notch/camera cutout — rather than just hiding the WebView's own
+    chrome and leaving the system bars/cutout inset in place.
+  - Keeps the screen from sleeping/locking for as long as fullscreen
+    video is on screen (`FLAG_KEEP_SCREEN_ON`), and lets it go back
+    to normal once fullscreen ends.
+  - Rotates fullscreen video to match the *video's* own orientation
+    — landscape upload gets a landscape-locked fullscreen, portrait/
+    Shorts gets portrait — the way the YouTube app does, overriding
+    the phone's system auto-rotate lock rather than deferring to it.
+    Restores whatever orientation you were in before once fullscreen
+    ends.
+  - Syncs the status/nav bar color to whichever theme YouTube itself
+    is rendering (its own light/dark toggle, not the phone's system
+    theme).
+  - Hides YouTube's own "open app" nag button/banner, since this app
+    already *is* that experience, just wrapped natively.
 - `ArkTubeApplication.kt` — enables Material You dynamic color on
   Android 12+; only affects the splash screen and system bars, since
   the WebView content is YouTube's own theming.
@@ -47,7 +70,11 @@ stay deliberately small until the underlying approach is proven":
 - [x] Loads YouTube (mobile web UI, via `m.youtube.com`)
 - [x] JS / DOM storage / cookies enabled (so login persists)
 - [x] In-app back button walks WebView history before exiting
-- [x] Fullscreen video works (`WebChromeClient` custom-view hooks)
+- [x] Fullscreen video works (`WebChromeClient` custom-view hooks),
+      true edge-to-edge (status bar, nav bar, and notch/cutout all
+      hidden), cropped to fill rather than letterboxed, oriented to
+      match the video's own shape regardless of the rotation lock,
+      and keeps the screen awake for as long as it's on screen
 - [ ] Playback verification on a real device
 - [ ] Authentication / session-persistence verification
 - [ ] Picture-in-picture
