@@ -38,6 +38,13 @@ import androidx.core.view.WindowInsetsControllerCompat
  * approach is proven"):
  *  - loads YouTube
  *  - keeps JS/DOM storage/session cookies working (login persistence)
+ *  - reports the device's real, actual viewport size/density to the
+ *    page instead of WebView's legacy fixed-width default (see
+ *    useWideViewPort/loadWithOverviewMode in onCreate()), so
+ *    m.youtube.com's own responsive layout renders its phone
+ *    breakpoint (full-bleed player) rather than misreading a fixed
+ *    ~980px legacy layout width as tablet-sized and switching to its
+ *    desktop-style sidebar layout
  *  - lets in-app back navigation walk the WebView's own history first
  *  - allows fullscreen video (WebChromeClient's
  *    on/onHideCustomView) since YouTube's HTML5 player needs it for
@@ -198,6 +205,28 @@ class MainActivity : AppCompatActivity() {
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
         webView.settings.databaseEnabled = true
+        // Off by default, which is the actual root cause of the
+        // "sidebar squeezed everything" layout bug: with this off,
+        // WebView ignores the page's own <meta name="viewport"> tag
+        // entirely and lays it out at a fixed legacy width (~980 CSS
+        // px) zoomed out to fit, regardless of the device's real
+        // screen size or orientation -- so window.innerWidth inside
+        // the page never reflects reality, m.youtube.com reads that
+        // fixed ~980px as "tablet-width", and renders its two-column
+        // desktop-style watch layout (small player + sidebar of
+        // related videos) instead of the full-bleed phone layout,
+        // in *both* orientations. Turning it on makes the WebView
+        // report the device's actual CSS viewport width/density to
+        // the page (i.e. what device-width actually resolves to),
+        // which is the "dynamically get [the real size] from the
+        // client" fix -- not a fixed DPI/zoom override, just letting
+        // the page see the truth about the screen it's actually on.
+        webView.settings.useWideViewPort = true
+        // Companion setting: without this, content initially loads
+        // zoomed out to show the whole (now correctly wide) layout
+        // before settling, producing a visible snap/jump on first
+        // paint. This starts it already at "fit the viewport" scale.
+        webView.settings.loadWithOverviewMode = true
         // YouTube's HTML5 player calls play() without a direct user
         // tap in some flows (autoplay-next, restoring playback
         // position); WebView blocks that by default.
