@@ -62,6 +62,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Check out the project
+        # This job only downloaded the APK artifact before, with no
+        # checkout -- fine when everything was inline in the
+        # workflow's `script:` block, but now that the smoke-test
+        # logic lives in .github/scripts/android-smoke-test.sh (see
+        # the "Install and launch on an emulator" step below), that
+        # file needs to actually exist on the runner.
+        uses: actions/checkout@v4
+
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
@@ -91,23 +100,15 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            APK="$(find apk -name '*.apk' | head -n 1)"
-            if [ -z "$APK" ]; then
-              echo "::error::No .apk file found under apk/ -- listing what's actually there:"
-              find apk -type f
-              exit 1
-            fi
-            echo "Installing $APK"
-            adb install -r "$APK"
-            adb shell am start -n com.arktube.app/com.arktube.app.MainActivity
-            sleep 5
-            if ! adb shell pidof com.arktube.app; then
-              echo "::error::App process not found a few seconds after launch -- it likely crashed on startup. See logcat below."
-              adb logcat -d "*:E"
-              exit 1
-            fi
-            echo "App launched and is still running -- smoke test passed."
+          # A single line, not a multi-line block: this action runs
+          # each line of a multi-line `script:` input as its own
+          # separate `sh -c` invocation rather than as one combined
+          # script, which breaks any multi-line construct (variables
+          # set on one line are gone by the next; an `if`/`fi` split
+          # across lines becomes a bare, unterminated `if` on its
+          # own). See .github/scripts/android-smoke-test.sh for the
+          # actual logic and a fuller explanation.
+          script: bash .github/scripts/android-smoke-test.sh
 
   assemble-release:
     name: Assemble release APK
