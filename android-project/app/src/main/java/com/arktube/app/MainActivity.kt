@@ -1,5 +1,6 @@
 package com.arktube.app
 
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -63,6 +64,12 @@ class MainActivity : AppCompatActivity() {
     private var customView: android.view.View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
 
+    // Orientation to restore once fullscreen video ends -- captured
+    // fresh each time fullscreen is entered (not just once in
+    // onCreate) since it should snap back to whatever the user was
+    // actually in immediately before, not a fixed default.
+    private var preFullscreenOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Must be called before super.onCreate() -- swaps
         // Theme.ArkTubeApp.Starting (set on this activity in the
@@ -108,6 +115,13 @@ class MainActivity : AppCompatActivity() {
         // to reach Kotlin). "ArkTubeTheme" here is exactly the global
         // name THEME_SYNC_JS calls as window.ArkTubeTheme.
         webView.addJavascriptInterface(ThemeBridge(), "ArkTubeTheme")
+        // Lets ZOOM_TO_FILL_JS hand the fullscreen stream's own
+        // intrinsic width/height back to native code, so the
+        // fullscreen orientation can follow the *video's* shape
+        // (landscape video -> landscape, portrait/Shorts -> portrait)
+        // the way the YouTube app does, rather than just whatever
+        // the phone happens to be held as.
+        webView.addJavascriptInterface(OrientationBridge(), "ArkTubeOrientation")
 
         webView.webViewClient = object : WebViewClient() {
             // YouTube's fullscreen button doesn't hand the WebView a
@@ -140,6 +154,12 @@ class MainActivity : AppCompatActivity() {
                 customView = view
                 customViewCallback = callback
                 setContentView(view)
+                // Snapshot whatever orientation the activity was
+                // actually in right now, so exiting fullscreen snaps
+                // back to that -- not a hardcoded default -- even if
+                // this isn't the first time fullscreen's been
+                // entered this session.
+                preFullscreenOrientation = requestedOrientation
                 enterImmersiveFullscreen()
                 // Custom view is the real fullscreen surface, not
                 // the WebView -- FLAG_KEEP_SCREEN_ON has to be on
@@ -164,6 +184,7 @@ class MainActivity : AppCompatActivity() {
                 customViewCallback = null
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 exitImmersiveFullscreen()
+                requestedOrientation = preFullscreenOrientation
             }
         }
 
@@ -189,6 +210,48 @@ class MainActivity : AppCompatActivity() {
             // Called on the WebView's own JS thread, not the UI
             // thread -- window.statusBarColor etc. need the latter.
             runOnUiThread { applyStatusBarTheme(isDark, cssBackground) }
+        }
+    }
+
+    // Receives the fullscreen stream's intrinsic width/height from
+    // ZOOM_TO_FILL_JS so the activity can rotate to match it, the
+    // way the YouTube app does -- a landscape upload gets a
+    // landscape-locked fullscreen even if you entered fullscreen
+    // holding the phone upright, and vice versa for Shorts/portrait
+    // video.
+    private inner class OrientationBridge {
+        @JavascriptInterface
+        fun onFullscreenVideoSize(width: Int, height: Int) {
+            runOnUiThread { applyFullscreenOrientation(width, height) }
+        }
+    }
+
+    /**
+     * Locks the activity to whichever orientation matches the
+     * fullscreen video's own intrinsic shape -- landscape video gets
+     * a landscape-locked fullscreen, portrait/square video gets
+     * portrait -- regardless of the phone's system auto-rotate
+     * setting. Setting `requestedOrientation` directly is what makes
+     * this override the lock: it's an explicit per-activity request,
+     * independent of the system auto-rotate toggle (which only
+     * governs apps/activities that *haven't* requested a specific
+     * orientation). The SENSOR_ variants (rather than plain
+     * LANDSCAPE/PORTRAIT) still let the picture flip between the two
+     * landscape (or two portrait) rotations as the phone turns, just
+     * like the YouTube app -- they just refuse to leave that
+     * landscape/portrait pair.
+     *
+     * No-ops outside of actual fullscreen playback (customView ==
+     * null), since a late/duplicate JS callback firing after
+     * fullscreen has already been exited shouldn't be able to spin
+     * the activity back into a rotation lock.
+     */
+    private fun applyFullscreenOrientation(videoWidth: Int, videoHeight: Int) {
+        if (customView == null || videoWidth <= 0 || videoHeight <= 0) return
+        requestedOrientation = if (videoWidth >= videoHeight) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         }
     }
 
@@ -264,29 +327,53 @@ class MainActivity : AppCompatActivity() {
         private const val SITE_URL = "https://m.youtube.com"
 
         // Crops fullscreen video to fill the screen instead of
-        // YouTube's default letterboxed "fit". Scoped to *only* the
-        // <video> element inside document.fullscreenElement, and
-        // *only* a CSS transform -- never its layout box (width/
-        // height/object-fit), since YouTube's own controls read the
-        // video's real box size to position/hit-test themselves; a
-        // transform changes what's painted (and, correctly, what
-        // taps land on) without touching that box at all, so the
-        // controls stay exactly where YouTube put them.
+        // YouTube's default letterboxed "fit".
+        //
+        // The old version measured the <video> element's own
+        // getBoundingClientRect() and compared *that* box to
+        // window.innerWidth/innerHeight. That's the wrong thing to
+        // measure: YouTube's fullscreen CSS already stretches the
+        // <video> element's *box* to fill the whole screen (with
+        // object-fit: contain painting the actual letterboxed/
+        // pillarboxed picture *inside* that box) -- so the box was
+        // already ~screen-sized, the computed scale came out to
+        // ~1.0, and the "zoom to fill" was a no-op. What actually
+        // determines how much letterbox padding is being painted is
+        // the *stream's own* intrinsic pixel size (video.videoWidth
+        // / videoHeight) versus the size of the box it's being fit
+        // into -- so that's what's measured now.
+        //
+        // Scoped to *only* a CSS transform on the <video> -- never
+        // its layout box (width/height/object-fit) -- since
+        // YouTube's own controls read the video's real box size to
+        // position/hit-test themselves; a transform changes what's
+        // painted (and, correctly, what taps land on) without
+        // touching that box at all, so the controls stay exactly
+        // where YouTube put them.
+        //
+        // Also reports the stream's intrinsic width/height to native
+        // (ArkTubeOrientation) so the fullscreen orientation can
+        // follow the video's own shape, YouTube-app-style, rather
+        // than the phone's.
         //
         // Re-evaluates on fullscreenchange, on resize (covers
-        // rotation), and a couple of short delayed retries after
-        // entering fullscreen, since YouTube sometimes resizes its
-        // player again shortly after the fullscreen transition
-        // itself (e.g. once it settles on the actual stream
-        // dimensions). Guarded by a flag on `window` so re-injecting
-        // this on every onPageFinished doesn't register duplicate
-        // listeners within the same page's JS context.
+        // rotation), loadedmetadata (covers autoplay-next swapping
+        // in a differently-shaped video, and covers videoWidth/
+        // videoHeight simply not being known yet at the moment
+        // fullscreen is entered), and a couple of short delayed
+        // retries after entering fullscreen since YouTube sometimes
+        // resizes its player again shortly after the fullscreen
+        // transition itself. Guarded by a flag on `window` so
+        // re-injecting this on every onPageFinished doesn't register
+        // duplicate listeners within the same page's JS context.
         private const val ZOOM_TO_FILL_JS = """
             (function() {
                 if (window.__arktubeZoomToFillInstalled) { return; }
                 window.__arktubeZoomToFillInstalled = true;
 
                 var zoomedVideo = null;
+                var lastReportedW = 0;
+                var lastReportedH = 0;
 
                 function fullscreenVideo() {
                     var el = document.fullscreenElement || document.webkitFullscreenElement;
@@ -300,21 +387,61 @@ class MainActivity : AppCompatActivity() {
                     video.style.transformOrigin = '';
                 }
 
+                function reportOrientation(videoW, videoH) {
+                    if (!window.ArkTubeOrientation) { return; }
+                    if (videoW === lastReportedW && videoH === lastReportedH) { return; }
+                    lastReportedW = videoW;
+                    lastReportedH = videoH;
+                    window.ArkTubeOrientation.onFullscreenVideoSize(videoW, videoH);
+                }
+
                 function applyZoom() {
                     var video = fullscreenVideo();
                     if (zoomedVideo && zoomedVideo !== video) {
                         clearZoom(zoomedVideo);
+                        lastReportedW = 0;
+                        lastReportedH = 0;
                     }
                     zoomedVideo = video;
                     if (!video) { return; }
 
-                    var rect = video.getBoundingClientRect();
-                    if (!rect.width || !rect.height) { return; }
+                    // Intrinsic size of the decoded frame -- not the
+                    // element's own (possibly already screen-sized)
+                    // box.
+                    var videoW = video.videoWidth;
+                    var videoH = video.videoHeight;
+                    if (!videoW || !videoH) { return; }
 
-                    var scale = Math.max(
-                        window.innerWidth / rect.width,
-                        window.innerHeight / rect.height
-                    );
+                    reportOrientation(videoW, videoH);
+
+                    // The box that actually constrains the painted
+                    // picture: the fullscreen element itself, not
+                    // necessarily the <video>'s own box.
+                    var container = document.fullscreenElement || document.webkitFullscreenElement || video;
+                    var crect = container.getBoundingClientRect();
+                    var containerW = crect.width || window.innerWidth;
+                    var containerH = crect.height || window.innerHeight;
+                    if (!containerW || !containerH) { return; }
+
+                    var videoAspect = videoW / videoH;
+                    var containerAspect = containerW / containerH;
+
+                    // Size the picture is actually being painted at
+                    // under object-fit: contain (the letterboxed/
+                    // pillarboxed rect), then scale up so its short
+                    // side matches the container -- object-fit:
+                    // cover, effectively, done via transform instead
+                    // of object-fit so hit-testing math is untouched.
+                    var fittedW, fittedH;
+                    if (videoAspect > containerAspect) {
+                        fittedW = containerW;
+                        fittedH = containerW / videoAspect;
+                    } else {
+                        fittedH = containerH;
+                        fittedW = containerH * videoAspect;
+                    }
+
+                    var scale = Math.max(containerW / fittedW, containerH / fittedH);
 
                     if (!isFinite(scale) || scale <= 1.01) {
                         clearZoom(video);
@@ -342,6 +469,15 @@ class MainActivity : AppCompatActivity() {
                     setTimeout(scheduleApplyZoom, 300);
                     setTimeout(scheduleApplyZoom, 1000);
                 });
+                // 'loadedmetadata' is when videoWidth/videoHeight
+                // first become non-zero, and fires again if YouTube
+                // swaps in a new <video> src (autoplay-next) without
+                // a fresh fullscreenchange event.
+                document.addEventListener('loadedmetadata', function(e) {
+                    if (e.target === fullscreenVideo()) {
+                        scheduleApplyZoom();
+                    }
+                }, true);
             })();
         """
 
