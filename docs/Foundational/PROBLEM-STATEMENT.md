@@ -3,1206 +3,228 @@
 ## Design Document
 
 **Status:** Experimental
-**Target:** Desktop
-**Shell:** Neutralinojs
-**Initial UI:** YouTube web UI
+**Target:** Android
+**Shell:** Native Android (`WebView` + `WebChromeClient`, no bundled assets)
+**Initial UI:** YouTube's own mobile web UI (`m.youtube.com`)
 **Initial frontend technology:** Existing YouTube frontend / DOM
-**Future migration:** Svelte
-**Primary goal:** Make YouTube behave like an installed desktop application without redesigning the YouTube experience.
+**Future migration:** Selective native replacement of chrome around the page, not the page itself
+**Primary goal:** Make YouTube behave like a proper installed Android app -- on the hardware people actually own, not just this year's flagship -- without redesigning the YouTube experience.
 
 ---
 
 ## 1. Objective
 
-Build an installable desktop application that provides a **1:1 YouTube web experience** while behaving like a persistent desktop application.
+Build an installable Android application that provides a **1:1 YouTube mobile experience** while behaving like a persistent, native, low-overhead Android app instead of a browser tab.
 
 The application should:
 
-* look like the existing YouTube desktop website
+* look and feel like `m.youtube.com`'s existing responsive layout
 * retain YouTube's familiar navigation, player, feeds, search, channels, playlists, and recommendations
-* avoid unnecessary document-level navigation where technically possible
-* preserve application state between navigations
-* keep the desktop shell alive continuously
-* use Neutralinojs as the native application container
+* run comfortably on low-end and older Android devices, not just recent hardware
+* keep the app's process alive and its player state intact across normal navigation, rotation, and backgrounding
+* use a plain Android `WebView` as the native application container -- no Chrome Custom Tab hand-off, no separate browser process
 * initially avoid rewriting the YouTube UI
-* eventually replace individual pieces with native components
-* eventually migrate the UI architecture to Svelte if worthwhile
+* add native OS integration only where the *web* experience structurally can't reach it (fullscreen video compositing, lock-screen/Bluetooth media controls, system bar behavior)
+* eventually replace individual pieces of chrome with native components, if and when that's worth the added weight
 
-The guiding principle is:
+The guiding principle, unchanged from the desktop line of thinking, is:
 
 > **Do not redesign YouTube. Change the execution model around it.**
 
+On Android specifically, that execution model matters more than it does on desktop, because the audience for it skews toward the devices YouTube's own official app is heaviest on.
+
 ---
 
-# 2. Non-Goals
+## 2. Why Android, and Why This Approach, for Low-End Devices
 
-This project is not initially intended to be:
+The official YouTube app is a large, feature-dense application: it ships a full recommendation engine's worth of client logic, offline/Premium infrastructure, casting stacks, multiple video pipelines, and a sizeable codebase, all resident in memory together whether or not a given session touches most of it. On a flagship device none of this is noticeable. On a budget device -- 2-3 GB of RAM, an entry-level SoC, a device that's already two or three OS versions behind -- that weight shows up directly as slower cold starts, more aggressive background eviction, and a UI that drops frames the moment the recommendation feed or comments section has to do real work.
+
+The mobile *website*, by contrast, is something YouTube has to keep genuinely lightweight, because it has to work acceptably in a plain browser tab on exactly this same low-end hardware, over exactly this same patchy connection, for people who don't have the app installed at all. `m.youtube.com`'s rendering and JS payload is a fraction of the native app's footprint, and it's continuously kept that way by pressure ARKtube doesn't have to apply itself -- it just has to not get in the way of it.
+
+ARKtube's bet is that wrapping that already-lean web experience in the thinnest possible native shell gets most of what a low-end user actually wants from "the YouTube app" -- an icon on the home screen, it stays logged in, video plays properly, fullscreen works, media keys work -- without paying the official app's memory and CPU tax to get there. Concretely, that means:
+
+* **Lower baseline memory pressure.** One `WebView` instance and a small Kotlin `Activity`/`Service` pair, versus a multi-module native app framework. On a device where the OS is already killing background apps aggressively to keep the foreground one usable, a smaller resident footprint is the difference between ARKtube surviving a quick app-switch and it having to cold-restart every time.
+* **Faster cold start.** There's no native UI framework to inflate, no client-side database to open, no large asset bundle to unpack -- `WebView` starts, and the page it loads is the same page YouTube already optimizes for first paint on slow connections and weak CPUs.
+* **No local copy of YouTube to maintain, keep in sync, or fall behind on.** Because the "UI" is just YouTube's own live site, ARKtube automatically stays current with YouTube's own mobile-performance work, rather than shipping and having to maintain a bespoke reimplementation that a low-end device would render just as heavily as the real thing.
+* **Battery cost proportional to actually playing video, not to running a large always-on app shell.** `MediaPlaybackService` (see Section 9) only promotes itself to a foreground service, and only keeps the screen alive, while a video is genuinely playing -- not for the app's entire lifetime -- which matters more on a smaller battery than it does on a flagship with power to spare.
+* **Works on older Android versions for longer.** A thin `WebView`-based shell has a much smaller surface of native-API assumptions than a full native app, so it's cheaper to keep supporting the API levels that older, cheaper, and hand-me-down devices are still running.
+
+None of this makes ARKtube *better* than the official app on capability -- it deliberately does less. The claim is narrower and more specific: for the phone that struggles to keep the real YouTube app comfortable, a native shell around the mobile site is a meaningfully lighter way to get the same core experience -- watch videos, stay logged in, use the fullscreen player, control playback from the lock screen -- without the overhead that experience doesn't strictly need.
+
+---
+
+## 3. Non-Goals
+
+This project is not intended to be:
 
 * a new YouTube frontend
 * a privacy-focused YouTube alternative
-* a Piped/NewPipe client
+* a Piped/NewPipe/Invidious-style client
 * a visual redesign
 * a replacement recommendation algorithm
 * an independent video-hosting platform
+* offline download support, ad-blocking, or any behavior that changes what YouTube itself is willing to serve
 * a full rewrite of YouTube's frontend
-* an attempt to reproduce YouTube's proprietary source code
+* an attempt to reproduce YouTube's proprietary source code or bundle a local copy of its site
+* a claim of parity with the official app's feature set -- it is a deliberately smaller thing, aimed at a specific hardware/connectivity profile
 
-The first version should contain as little custom UI as possible.
-
----
-
-# 3. High-Level Architecture
-
-```text
-┌──────────────────────────────────────────────────────┐
-│                  Native Desktop App                  │
-│                    Neutralinojs                       │
-│                                                      │
-│  ┌────────────────────────────────────────────────┐  │
-│  │                WebView                         │  │
-│  │                                                │  │
-│  │              youtube.com                       │  │
-│  │                                                │  │
-│  │   ┌────────────┐     ┌─────────────────────┐  │  │
-│  │   │ Sidebar    │     │                     │  │  │
-│  │   │            │     │   YouTube content   │  │  │
-│  │   │ Home       │     │                     │  │  │
-│  │   │ Trending   │     │   Video / Search /  │  │  │
-│  │   │ Subs       │     │   Channel / Feed    │  │  │
-│  │   │ Library    │     │                     │  │  │
-│  │   └────────────┘     └─────────────────────┘  │  │
-│  │                                                │  │
-│  └────────────────────────────────────────────────┘  │
-│                         ▲                            │
-│                         │                            │
-│                 Navigation Controller                │
-│                         │                            │
-│              Neutralino JavaScript API               │
-└──────────────────────────────────────────────────────┘
-```
-
-Neutralino owns:
-
-* application lifecycle
-* native window
-* application installation
-* filesystem access where required
-* native menus
-* window controls
-* OS integration
-* application settings
-* future system media-key integration
-
-YouTube owns:
-
-* visual UI
-* video player
-* navigation
-* recommendation UI
-* authentication
-* account state
-* search
-* subscriptions
-* playlists
-* watch history
-* channel pages
-
-The client initially acts as a **desktop shell and navigation layer**, not a replacement YouTube implementation.
+The build should contain as little custom UI as possible. Every native line of code should exist because the *web layer structurally cannot* do that thing (see Section 6 below) -- not because native felt nicer to write.
 
 ---
 
-# 4. Core Design Principle
-
-The application should maintain a persistent top-level process.
-
-Traditional navigation:
+## 4. High-Level Architecture
 
 ```text
-User clicks video
-        ↓
-Browser navigation
-        ↓
-old document destroyed
-        ↓
-new document requested
-        ↓
-HTML parsed
-        ↓
-JavaScript initialized
-        ↓
-YouTube application initialized
-        ↓
-video displayed
++-------------------------------------------------------------+
+|                     Android Application                     |
+|                                                               |
+|  +-----------------------------------------------------+     |
+|  |                     MainActivity                     |     |
+|  |                                                       |     |
+|  |   rootLayout (FrameLayout, single setContentView)     |     |
+|  |   +-------------------------------------------+       |     |
+|  |   |                    WebView                 |       |     |
+|  |   |                                             |       |     |
+|  |   |              m.youtube.com                  |       |     |
+|  |   |                                             |       |     |
+|  |   |   Home / Search / Watch / Shorts / Channel /|       |     |
+|  |   |   Playlist / Subscriptions -- YouTube's own |       |     |
+|  |   |   responsive mobile layout, untouched        |       |     |
+|  |   +-------------------------------------------+       |     |
+|  |              (permanently attached -- see Section 5)  |     |
+|  |                                                       |     |
+|  |   fullscreenContainer (added only during fullscreen)  |     |
+|  |   +-------------------------------------------+       |     |
+|  |   |   WebChromeClient.onShowCustomView's video  |       |     |
+|  |   |   (hardware-composited SurfaceView, native)  |       |     |
+|  |   +-------------------------------------------+       |     |
+|  |   stretchToggleButton (top-level sibling, see 6)       |     |
+|  +-----------------------------------------------------+     |
+|                                                               |
+|                     MediaPlaybackService                     |
+|              (foreground only while actually playing)        |
++-------------------------------------------------------------+
 ```
 
-Desired behavior:
+Android/`WebView` owns:
 
-```text
-User clicks video
-        ↓
-Navigation intercepted
-        ↓
-existing application remains alive
-        ↓
-route/state changes
-        ↓
-required content updates
-        ↓
-video changes
-```
+* application lifecycle, process, and window
+* installation and the home-screen icon/splash
+* fullscreen video compositing (`WebChromeClient.onShowCustomView`/`onHideCustomView`)
+* system bar / immersive-mode behavior during fullscreen
+* device orientation locking to match the video's own shape
+* the lock-screen/notification/Bluetooth media session
+* status/nav bar theming to match whatever YouTube itself is rendering
 
-The desktop shell must never be destroyed simply because the user navigates between YouTube pages.
+YouTube (the live mobile site, unmodified) owns:
+
+* visual UI, layout, and responsive breakpoints
+* the video player itself, playback logic, quality selection
+* navigation, search, recommendations
+* authentication, account state, cookies/session
+* subscriptions, playlists, watch history, channel pages
+
+The client is a **native shell and a small number of native-only affordances layered on top of the site**, not a replacement YouTube implementation. This split is what keeps the native codebase small enough to stay cheap on low-end hardware -- see Section 2.
 
 ---
 
-# 5. Neutralino Application
+## 5. Core Design Principle
 
-The Neutralino application should initially be extremely thin.
+The application maintains a single persistent `WebView`, attached to the window for the entire life of the Activity -- including while fullscreen video is showing.
+
+An earlier prototype instead called `setContentView(customView)` to show fullscreen video, fully detaching the `WebView` from the window while fullscreen was active. That detachment ties directly into the page's own Page Visibility API: Android's `WebView` reports `document.hidden = true` the moment it's detached, regardless of whether the app itself is foregrounded. YouTube's own player treats that exactly like the tab going to the background and reacts by exiting fullscreen again almost immediately -- the "fullscreen blinking and reverting" bug this project hit early on.
+
+The fix is architectural, not a workaround: never detach the `WebView`. Fullscreen video is instead drawn in a second, opaque `FrameLayout` added *on top of* the still-attached `WebView`, so the page never observes a visibility change at all.
 
 ```text
-ARKtube/
-│
-├── neutralino.config.json
-│
-├── resources/
-│   ├── index.html
-│   ├── app.js
-│   └── styles.css
-│
-├── native/
-│   └── ...
-│
-└── README.md
+Fullscreen requested
+        |
+WebChromeClient.onShowCustomView() fires
+        |
+WebView stays attached, now just visually covered
+        |
+opaque video container added as a sibling on top
+        |
+native crop / orientation / immersive-mode logic takes over
+        |
+WebChromeClient.onHideCustomView() fires
+        |
+container removed, WebView was never actually touched
 ```
 
-The initial `index.html` should do almost nothing.
-
-Conceptually:
-
-```html
-<body>
-    <div id="app"></div>
-    <script src="/app.js"></script>
-</body>
-```
-
-The first prototype should determine whether the Neutralino WebView can reliably host the target YouTube experience before significant architecture is introduced.
+This is the same underlying instinct as the desktop version's "don't tear down the shell on navigation" principle, applied to the one native surface (fullscreen video) that Android hands the app outside the DOM entirely.
 
 ---
 
-# 6. WebView Strategy
+## 6. Fullscreen Video: The Part That Isn't Just a WebView
 
-The application will initially load YouTube inside the Neutralino WebView.
+Fullscreen playback is the one place this project has to do real native work, and it's worth being explicit about *why*, since it's also where most of the low-end-device-specific bugs have shown up.
 
-Conceptually:
+When YouTube's HTML5 player enters fullscreen, Chromium doesn't keep rendering a `<video>` element through the normal DOM/CSS pipeline. It hands the app a separate native `View` via `WebChromeClient.onShowCustomView()` -- backed by its own hardware-composited `SurfaceView`, entirely outside the page. Two consequences follow directly from that, both of which matter more on cheaper hardware:
 
-```text
-Neutralino
-    │
-    └── WebView
-          │
-          └── https://www.youtube.com
-```
+* **No CSS or DOM-level fix can touch it.** Object-fit rules, transforms on the `<video>` element, viewport meta tweaks -- none of it reaches this layer. The zoom-to-fill crop that removes YouTube's default letterbox/pillarbox bars has to be a native `View.scaleX`/`scaleY` operation on the `SurfaceView`'s container instead, driven by the video's own intrinsic pixel size (read once, over a small JS bridge, since that's DOM-only information native code has no other way to observe).
+* **That `SurfaceView` composites above the normal View hierarchy by default**, via `setZOrderOnTop`/`setZOrderMediaOverlay` flags Chromium sets for efficient hardware compositing. Any native overlay this app adds -- the manual stretch-to-fill toggle, and anything added after it -- has to have those flags actively neutralized on the video's `SurfaceView`, or it silently sits behind the video, unreachable, no matter what order it was added to the layout in.
 
-The client should not immediately attempt to copy YouTube's frontend.
+This second point is worth calling out specifically because it's a *timing*, not a one-time, problem: the actual `SurfaceView` frequently isn't attached inside the handed-back `View` yet at the moment `onShowCustomView()` fires -- it shows up a frame or more later, once the underlying `Surface` is actually created. A one-shot neutralization pass at fullscreen-entry time can run before that child exists and find nothing to fix. The correct fix re-checks on every layout pass for the duration of fullscreen, catching a late-attached `SurfaceView` as soon as it appears rather than assuming it was there from the start.
 
-The purpose of this phase is to determine:
-
-1. whether YouTube operates correctly inside the WebView
-2. whether login works
-3. whether video playback works
-4. whether cookies/session state persist
-5. whether navigation can be observed
-6. whether navigation can be intercepted
-7. whether the WebView exposes enough functionality for the desired behavior
-
-This is a feasibility phase, not the final implementation.
+None of this is Android-version- or device-tier-specific in principle, but it's exactly the kind of subtle native/Chromium interaction that's easy to under-test on a fast device (where the timing window this race depends on is narrow enough to rarely lose) and then hit reliably on a slower one (where it isn't). Low-end-device testing isn't just about frame rate and memory here -- it changes which race conditions actually show up.
 
 ---
 
-# 7. Navigation Controller
+## 7. Immersive Mode and Orientation
 
-The most important custom component is the navigation controller.
+Fullscreen video goes truly edge-to-edge: status bar, nav bar (gesture pill or 3-button), and the notch/camera cutout are all hidden or drawn under, only while the native fullscreen `View` is showing. `BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE` lets a user still swipe the bars back temporarily without permanently exiting fullscreen.
 
-```text
-NavigationController
-│
-├── observeNavigation()
-├── classifyNavigation()
-├── preventFullNavigation()
-├── navigate()
-├── preserveState()
-└── restoreState()
-```
+Android silently redraws system bars on window-focus churn -- including the brief refocus that happens when YouTube's own in-page settings/quality menu opens. Left unhandled, a reasserted status bar can sit in front of the page for exactly long enough to swallow the tap meant for that menu. The fix is to reassert immersive mode on every focus-regain while fullscreen is active, closing that window before a user gets a chance to tap into it.
 
-It should distinguish between:
-
-```text
-Internal YouTube navigation
-External navigation
-Authentication navigation
-Download navigation
-Browser/system navigation
-```
-
-Internal routes include examples such as:
-
-```text
-/
- /watch?v=...
- /results?search_query=...
- /@channel
- /channel/...
- /playlist?list=...
- /feed/subscriptions
- /shorts/...
-```
-
-The controller should treat internal navigation as application navigation whenever possible.
+Orientation is locked to match the *video's* own intrinsic shape rather than the phone's physical orientation -- landscape uploads get a landscape-locked fullscreen, Shorts/portrait video gets portrait-locked -- the way the official app behaves, restoring whatever orientation preceded fullscreen once it ends.
 
 ---
 
-# 8. Persistent Application Shell
+## 8. Persistent WebView, Reflow, and Rotation
 
-The desktop application should maintain one long-lived WebView/application context.
+Locking the activity's own configuration-change handling keeps a rotation from tearing down and recreating the Activity, which would otherwise reload the `WebView` from scratch -- losing scroll position and player state, and flashing a blank page on a device that's already slower to reload anything.
 
-Conceptually:
-
-```text
-Application lifetime
-─────────────────────────────────────────────>
-
-┌───────────────────────────────────────────┐
-│ WebView                                   │
-│                                           │
-│ Sidebar ───────────────────────────────┐  │
-│                                        │  │
-│ Header                                 │  │
-│                                        │  │
-│ Content changes                        │  │
-│                                        │  │
-│ Video player may remain alive          │  │
-│                                        │  │
-└────────────────────────────────────────┘  │
-                                           │
-           application never destroyed ───┘
-```
-
-The goal is not necessarily to keep every DOM node forever.
-
-The goal is to keep the **application context** alive.
+That keeps the Activity alive across rotation, but it also means nothing else runs automatically on rotation unless it's explicitly hooked. Android resizes the `WebView` correctly on its own, and Chromium's layout engine reflows *visible* content fine -- but content that was already rendered off-screen before the rotation (most visibly further rows of the "Up next" feed) can get stuck at the stale pre-rotation width until manually scrolled into view, because the specific resize-related DOM events YouTube's own JS listens for to decide when to re-measure deferred content don't reliably fire just from the `WebView`'s own size change. The fix dispatches those events synthetically and nudges scroll position by a pixel and back, covering either signal YouTube's code might be listening on.
 
 ---
 
-# 9. Navigation State
+## 9. Media Session and Background Playback
 
-The client should maintain:
+The application exposes the currently playing video to the rest of the OS as a real media session, so play/pause/seek/skip reach it from outside the app: the lock screen, the notification shade, a wired headset's inline remote, Bluetooth AVRCP buttons, a paired watch.
 
-```js
-const navigationState = {
-    currentURL: null,
-    previousURL: null,
-    history: [],
-    scrollPositions: new Map(),
-    playerState: null
-};
-```
+A small JS bridge watches the page's own `<video>` element for play/pause/progress state and title/artwork -- the one piece of this feature that genuinely has to come from JS, since "is this element actually playing" and "what's its title" are DOM-only facts. Everything downstream of that -- the actual media session, the foreground notification, audio focus -- lives natively in `MediaPlaybackService`.
 
-Before navigation:
-
-```text
-current page
-    ↓
-save state
-    ↓
-navigate
-    ↓
-restore relevant state
-```
-
-For example:
-
-```text
-Home
- ↓
-Video A
- ↓
-Channel
- ↓
-Video B
- ↓
-Back
-```
-
-Back should return to the previous application state rather than reconstructing an entire browser document.
+Consistent with Section 2, this service is intentionally cheap when it isn't needed: it stays a bound-but-not-foreground service until real playback is actually reported, and only then promotes itself and posts a notification -- rather than eagerly running foreground for the entire time the app is open, which would cost battery and memory a low-end device can less afford to spend on an app that isn't currently playing anything.
 
 ---
 
-# 10. YouTube UI Fidelity
+## 10. Theming
 
-The initial implementation should intentionally avoid changing:
-
-* typography
-* colors
-* icons
-* spacing
-* thumbnails
-* player controls
-* sidebar
-* cards
-* channel pages
-* search results
-* recommendation layout
-
-The UI should remain visually recognizable as YouTube.
-
-Custom styling should initially be limited to desktop-shell concerns:
-
-```text
-Window frame
-Window controls
-Native menus
-Optional title bar
-Application-level loading states
-Optional keyboard shortcuts
-```
-
-Do not spend time recreating YouTube CSS.
-
-That is precisely the sort of noble engineering sacrifice that produces six months of CSS archaeology.
+Status and navigation bar colors track whatever YouTube itself is rendering -- its own light/dark toggle, not the phone's system theme -- read from the page's computed background and applied natively, including flipping the bar icons' own light/dark appearance to stay legible against it.
 
 ---
 
-# 11. Desktop Behavior
+## 11. Explicitly Out of Scope for Now
 
-The application should behave like a native desktop application.
-
-Desired features:
-
-### Window
-
-* resizable
-* maximizable
-* minimizable
-* persistent window size
-* persistent window position where supported
-
-### Application lifecycle
-
-```text
-Launch
- ↓
-restore session
- ↓
-load YouTube
- ↓
-restore last route where possible
-```
-
-### Close
-
-Closing the application should terminate the Neutralino process normally.
-
-### Relaunch
-
-The application may restore:
-
-```text
-last URL
-last window dimensions
-theme preference
-sidebar state
-player state where technically possible
-```
+Consistent with keeping the native codebase small (Sections 2-3): a persistent native nav shell/sidebar, download interception, picture-in-picture, a native playlist/queue, Android Auto browsing, Chromecast, ad-blocking, or any custom UI layered permanently over the page. Each of these is a plausible future native addition, but each one also adds weight this project is deliberately trying not to carry until there's a concrete reason it can't be done in the web layer at all.
 
 ---
 
-# 12. Keyboard Architecture
+## 12. Success Criteria
 
-Desktop shortcuts should eventually be handled outside YouTube's page-level event system where appropriate.
+The Android build should be considered working when, on a representative **low-end** device (not just a development flagship):
 
-Examples:
-
-```text
-Ctrl/Cmd + L       focus application search
-Ctrl/Cmd + K       search
-Alt + Left         back
-Alt + Right        forward
-Space              play/pause
-F                   fullscreen
-M                   mute
-```
-
-However, YouTube's existing keyboard behavior should remain authoritative where conflicts exist.
-
-The rule is:
-
-> Do not break YouTube shortcuts merely to prove that we have a desktop application.
+* the app installs, launches, and reaches a usable YouTube feed noticeably faster than a cold start of the official app
+* login/session state persists across app restarts
+* the in-page fullscreen button reliably enters and stays in fullscreen (no blink-and-revert)
+* fullscreen video fills the screen edge-to-edge, with the manual stretch-to-fill toggle visible and tappable at all times fullscreen is active
+* rotation during fullscreen locks to the video's own orientation without breaking layout or losing the crop
+* lock-screen and Bluetooth/wired media controls correctly reflect and control actual playback state
+* the app does not visibly compete for memory/CPU the way the official app can on the same hardware, under normal browsing-and-watching use
 
 ---
 
-# 13. Performance Model
+## 13. Guiding Principle
 
-The primary performance objective is **navigation continuity**, not synthetic benchmark numbers.
-
-The application should avoid unnecessary:
-
-```text
-DOM destruction
-JavaScript reinitialization
-network requests
-image decoding
-player initialization
-authentication initialization
-layout reconstruction
-```
-
-Ideal navigation:
-
-```text
-Click
- ↓
-<100 ms
- ↓
-route transition begins
- ↓
-existing shell remains
- ↓
-data/content changes
- ↓
-new view settles
-```
-
-The client should prioritize:
-
-1. persistent state
-2. reduced network duplication
-3. reduced DOM destruction
-4. player persistence
-5. thumbnail reuse
-6. background prefetching
-
-Only after those should low-level optimization be considered.
-
----
-
-# 14. Background Work
-
-Operations that do not need to block navigation should execute asynchronously.
-
-Examples:
-
-```text
-thumbnail loading
-recommendation fetching
-history synchronization
-metadata fetching
-prefetching
-settings persistence
-analytics-related work
-```
-
-Conceptually:
-
-```text
-User action
-    │
-    ├── critical path
-    │      └── update visible content
-    │
-    └── background path
-           ├── recommendations
-           ├── thumbnails
-           ├── metadata
-           └── cache updates
-```
-
----
-
-# 15. Caching
-
-A lightweight client cache should eventually be introduced.
-
-Potential cache targets:
-
-```text
-video metadata
-channel metadata
-thumbnails
-search results
-navigation state
-preferences
-```
-
-Do not cache video streams initially.
-
-Cache invalidation is already one of software's oldest ways of making a developer regret having free time.
-
----
-
-# 16. Authentication
-
-Authentication should initially remain YouTube's responsibility.
-
-The application should preserve the WebView's supported session state rather than implementing a separate authentication system.
-
-Desired behavior:
-
-```text
-User signs in
-       ↓
-YouTube session established
-       ↓
-cookies/session persisted
-       ↓
-application restarted
-       ↓
-session restored
-```
-
-No password or authentication token should be manually extracted into the Neutralino application unless explicitly required and legally/technically appropriate.
-
----
-
-# 17. Player Strategy
-
-Phase 1:
-
-```text
-Use YouTube's existing player.
-```
-
-Do not build a custom player.
-
-The existing player already solves:
-
-* adaptive streaming
-* codecs
-* quality selection
-* subtitles
-* playback state
-* DRM-related behavior where applicable
-* fullscreen
-* buffering
-* playback telemetry
-
-Replacing it would multiply the project's complexity immediately.
-
-Later:
-
-```text
-YouTube player
-       │
-       └── optional abstraction
-                │
-                ├── existing player
-                └── future custom player
-```
-
-This keeps the architecture replaceable without making replacement the initial goal.
-
----
-
-# 18. Neutralino Native Integration
-
-Neutralino should expose native functionality through a small application bridge.
-
-```text
-Web UI
-  │
-  ▼
-AppBridge
-  │
-  ├── Window
-  ├── Storage
-  ├── Filesystem
-  ├── Menu
-  ├── Notifications
-  └── OS integration
-```
-
-Example conceptual API:
-
-```js
-App.window.minimize()
-App.window.maximize()
-
-App.storage.get("lastRoute")
-App.storage.set("lastRoute", url)
-
-App.settings.get()
-App.settings.set()
-```
-
-The UI should not directly depend on Neutralino APIs everywhere.
-
-Instead:
-
-```text
-Vue / future Svelte
-        ↓
-    AppBridge
-        ↓
-   Neutralino
-```
-
-This is important for the eventual Svelte migration.
-
----
-
-# 19. Frontend Framework
-
-The initial application does not need to introduce Vue or Svelte.
-
-YouTube already provides the UI.
-
-The custom layer should therefore remain framework-light:
-
-```text
-Neutralino
-    │
-    ├── thin JS bridge
-    │
-    └── YouTube WebView
-```
-
-If the project eventually replaces portions of the YouTube UI:
-
-```text
-Neutralino
-    │
-    └── WebView
-          │
-          ├── YouTube
-          │
-          └── custom components
-                  │
-                  └── initially Vue 3
-```
-
-Later:
-
-```text
-Vue 3
-  ↓
-Svelte
-```
-
-The API boundary should remain:
-
-```text
-UI
- ↓
-application services
- ↓
-YouTube integration
-```
-
-rather than:
-
-```text
-Vue component
- ↓
-Neutralino API
- ↓
-YouTube
-```
-
----
-
-# 20. Migration Path to Svelte
-
-The migration should happen only after the behavior is proven.
-
-### Phase A
-
-```text
-Neutralino
-+
-YouTube
-```
-
-### Phase B
-
-```text
-Neutralino
-+
-YouTube
-+
-navigation controller
-+
-desktop integration
-```
-
-### Phase C
-
-Replace isolated UI elements:
-
-```text
-Custom sidebar
-Custom header
-Custom loading states
-Custom settings
-```
-
-### Phase D
-
-Introduce Vue 3 where custom UI becomes substantial.
-
-### Phase E
-
-Extract application services.
-
-```text
-services/
-├── navigation.js
-├── youtube.js
-├── storage.js
-├── player.js
-└── settings.js
-```
-
-### Phase F
-
-Replace Vue components with Svelte.
-
-The underlying service layer remains unchanged.
-
----
-
-# 21. Project Phases
-
-## Phase 0: Feasibility
-
-Goal:
-
-> Can YouTube reliably operate inside Neutralino's WebView?
-
-Test:
-
-* homepage
-* search
-* video playback
-* login
-* cookies
-* fullscreen
-* navigation
-* back/forward
-* redirects
-* popups
-* downloads
-
-No custom UI.
-
----
-
-## Phase 1: Desktop Shell
-
-Implement:
-
-```text
-Neutralino
-+
-YouTube
-+
-persistent window
-+
-window state
-+
-application settings
-```
-
-Result:
-
-> YouTube in an installable desktop window.
-
----
-
-## Phase 2: Navigation
-
-Implement:
-
-```text
-navigation observation
-route classification
-history
-back/forward
-state persistence
-```
-
-Result:
-
-> YouTube begins behaving like a desktop application.
-
----
-
-## Phase 3: Continuity
-
-Improve:
-
-```text
-navigation transitions
-player persistence
-scroll restoration
-thumbnail reuse
-background loading
-```
-
-Result:
-
-> Clicking around YouTube feels continuous rather than document-oriented.
-
----
-
-## Phase 4: Desktop Integration
-
-Add:
-
-```text
-native menus
-keyboard shortcuts
-notifications
-media keys
-window controls
-persistent settings
-```
-
-Result:
-
-> It feels like an actual installed application.
-
----
-
-## Phase 5: Selective UI Replacement
-
-Only now begin replacing YouTube components.
-
-Potential candidates:
-
-```text
-sidebar
-header
-search box
-navigation indicators
-settings
-desktop-specific controls
-```
-
----
-
-## Phase 6: Svelte
-
-Once the architecture is stable:
-
-```text
-Vue/custom components
-       ↓
-Svelte components
-```
-
-No major backend or shell rewrite should be required.
-
----
-
-# 22. Failure Modes
-
-### Full-page navigation cannot be prevented
-
-Fallback:
-
-```text
-Keep normal YouTube navigation.
-```
-
-Do not create a fragile interception layer merely for the sake of avoiding reloads.
-
----
-
-### YouTube detects or rejects the embedded environment
-
-Fallback:
-
-```text
-Use the system browser or supported external navigation.
-```
-
-The application should fail gracefully instead of trying to impersonate a browser indefinitely.
-
----
-
-### Authentication does not persist
-
-Fallback:
-
-```text
-Investigate WebView profile/storage configuration.
-```
-
-Do not manually copy credentials.
-
----
-
-### YouTube changes its frontend
-
-This is expected.
-
-Because the initial architecture uses YouTube's own UI, visual updates should automatically arrive with YouTube rather than requiring the client to reproduce every redesign.
-
-That is one of the primary advantages of this architecture.
-
----
-
-# 23. Security
-
-The application must treat YouTube content as untrusted web content.
-
-Neutralino native APIs should not be exposed unnecessarily to the web context.
-
-The bridge should expose only explicitly required operations.
-
-Prefer:
-
-```text
-YouTube
-   │
-   │ restricted
-   ▼
-AppBridge
-   │
-   ▼
-Neutralino
-```
-
-rather than exposing arbitrary filesystem/process functionality.
-
-Native capabilities should follow least privilege.
-
----
-
-# 24. Success Criteria
-
-The project is successful when:
-
-### Visual
-
-```text
-YouTube desktop UI
-≈
-YouTube desktop website
-```
-
-No unnecessary redesign.
-
-### Behavioral
-
-```text
-Navigation
-≈
-desktop application
-```
-
-### Technical
-
-```text
-Persistent Neutralino process
-Persistent WebView context
-Minimal unnecessary document reloads
-Background non-critical work
-Persistent session
-Persistent window state
-```
-
-### User experience
-
-The user can:
-
-```text
-Launch application
-        ↓
-YouTube appears
-        ↓
-Search
-        ↓
-Open video
-        ↓
-Open channel
-        ↓
-Return to video
-        ↓
-Continue browsing
-```
-
-without the application feeling like:
-
-```text
-"website inside a box"
-```
-
-Instead it should feel like:
-
-```text
-"YouTube is the application."
-```
-
----
-
-# 25. Guiding Principle
-
-The project should follow one rule above all others:
-
-> **Borrow behavior and appearance before rebuilding anything.**
-
-The first implementation should contain very little custom code.
-
-Every piece of functionality should pass this test:
-
-```text
-Can YouTube already do this?
-        │
-       YES
-        │
-        └── Let YouTube do it.
-
-       NO
-        │
-        └── Add the smallest possible desktop layer.
-```
-
-The final architecture should therefore evolve from:
-
-```text
-Neutralino
-    ↓
-YouTube
-```
-
-into:
-
-```text
-Neutralino
-    ↓
-Application shell
-    ↓
-YouTube experience
-    ↓
-Selective custom desktop behavior
-```
-
-and eventually, if justified:
-
-```text
-Neutralino
-    ↓
-Svelte application
-    ↓
-YouTube-compatible services
-    ↓
-YouTube
-```
-
-The migration is progressive rather than a rewrite.
-
----
-
-# 26. Initial Repository Structure
-
-```text
-ARKtube/
-│
-├── neutralino.config.json
-│
-├── resources/
-│   ├── index.html
-│   ├── app.js
-│   │
-│   ├── bridge/
-│   │   ├── neutralino.js
-│   │   └── app-bridge.js
-│   │
-│   └── styles/
-│       └── shell.css
-│
-├── native/
-│
-├── docs/
-│   └── DESIGN.md
-│
-├── package.json
-│
-└── README.md
-```
-
-Keep it tiny.
-
-The project should earn complexity rather than starting with it.
-
----
-
-# 27. Immediate Implementation Order
-
-The first development session should contain only these steps:
-
-```text
-1. Create Neutralino project
-2. Load YouTube
-3. Verify video playback
-4. Verify login/session persistence
-5. Verify navigation
-6. Determine what navigation events Neutralino/WebView exposes
-7. Prototype navigation interception
-8. Measure whether the desired behavior is actually achievable
-```
-
-Only after step 8 should the project acquire a frontend architecture.
-
-If the WebView cannot provide the required navigation/control primitives, that discovery is far more valuable than spending a week building a beautiful Vue application around an impossible assumption.
-
----
-
-## Final Architecture
-
-```text
-                         ┌───────────────────────┐
-                         │     Native Desktop    │
-                         │       Neutralino      │
-                         └───────────┬───────────┘
-                                     │
-                                     ▼
-                         ┌───────────────────────┐
-                         │   Persistent WebView  │
-                         └───────────┬───────────┘
-                                     │
-                    ┌────────────────┴────────────────┐
-                    │                                 │
-                    ▼                                 ▼
-             YouTube Website                  Desktop Bridge
-                    │                                 │
-                    │                                 ├── Window
-                    │                                 ├── Storage
-                    │                                 ├── Settings
-                    │                                 ├── Shortcuts
-                    │                                 └── OS integration
-                    │
-                    ▼
-             Existing YouTube UI
-                    │
-                    ├── Home
-                    ├── Search
-                    ├── Watch
-                    ├── Channels
-                    ├── Playlists
-                    ├── Subscriptions
-                    └── Player
-```
-
-**Version 0.1 is intentionally boring.**
-
-That's a feature.
-
-The first milestone isn't "build YouTube."
-
-It's:
-
-> **Put YouTube in a Neutralino window and prove we can control navigation without destroying the application context.**
-
-Once that works, the rest becomes incremental engineering instead of a giant speculative rewrite.
+> A phone that struggles to keep the official YouTube app smooth for more than a few minutes should still be able to watch YouTube comfortably, in something that looks and feels like a real app rather than a browser tab -- without ARKtube itself becoming the next heavy thing on that device.
