@@ -36,7 +36,9 @@ concern a package that matches what it's actually responsible for:
 ```
 com.arktube.app
 ├── MainActivity.kt          -- Activity lifecycle + wiring only
-├── MediaPlaybackService.kt  -- session/audio-focus lifecycle only
+├── MediaPlaybackService.kt  -- session lifecycle only (no native
+│                               audio focus -- see
+│                               SYSTEM-DESIGN-AGREEMENTS.md)
 ├── ArkTubeApplication.kt    -- process-wide startup (logger init, etc.)
 ├── fullscreen/               -- everything about fullscreen video
 ├── webview/                  -- WebView construction + JS bridges

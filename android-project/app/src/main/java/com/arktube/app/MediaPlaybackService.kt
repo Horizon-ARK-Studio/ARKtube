@@ -6,7 +6,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
-import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
@@ -36,7 +35,7 @@ import com.arktube.app.media.MediaNotificationFactory
  *
  * The notification itself -- what it looks like, its actions, its
  * channel -- is built by [MediaNotificationFactory] (GoF Factory),
- * not here; this class owns the session/audio-focus lifecycle only.
+ * not here; this class owns the session lifecycle only.
  * See docs/Foundational/CODE-STYLE.md Section 1 for why those are
  * kept as two separate reasons to change even though they're closely
  * related.
@@ -50,9 +49,9 @@ import com.arktube.app.media.MediaNotificationFactory
  * Runs as a Service (rather than living directly in the Activity) for
  * two reasons: it's what lets Android show a MediaStyle notification
  * at all per the platform's own guidelines, and it keeps the session
- * -- and the audio-focus/becoming-noisy handling below -- alive
- * across brief Activity recreation instead of tearing down and
- * rebuilding transport control on every config change. It's bound
+ * -- and the becoming-noisy handling below -- alive across brief
+ * Activity recreation instead of tearing down and rebuilding
+ * transport control on every config change. It's bound
  * (see [LocalBinder]) as soon as MainActivity starts, but only
  * promoted into the *foreground* -- which is what actually posts the
  * notification -- the first time real playback is reported; see
@@ -96,30 +95,33 @@ class MediaPlaybackService : Service() {
 
     private val binder = LocalBinder()
     private lateinit var mediaSession: MediaSessionCompat
-    private lateinit var audioManager: AudioManager
     private var commandListener: CommandListener? = null
     private var isPlaying = false
-    private var audioFocusRequest: AudioFocusRequest? = null
 
-    // Pauses on an outright focus loss (a phone call starting, another
-    // player taking over) -- the same etiquette every other media app
-    // follows, and without it the video would carry on playing under/
-    // over whatever else now also wants the speaker.
-    private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
-        // DIAGNOSTIC (BUG: play-tap-immediately-repauses) -- remove once
-        // root cause is confirmed either way. If this logs LOSS_TRANSIENT
-        // within ~tens of ms of a MEDIA_CONTROL_PLAY_JS/onPlayCommand log
-        // line, WebView/Chromium's own internal audio-focus request for
-        // the same <video> element is evicting this app's own native
-        // AudioFocusRequest -- i.e. this app is fighting itself over one
-        // physical audio stream, not receiving a genuine external
-        // interruption.
-        ArkLogger.w(COMPONENT, "onAudioFocusChange focusChange=$focusChange")
-        when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> commandListener?.onPauseCommand()
-        }
-    }
+    // Deliberately NOT requesting native AudioFocusRequest here. This
+    // service and WebView/Chromium's own internal media stack are two
+    // independent audio-focus requesters for the *same physical stream*
+    // (the page's <video> element) in the same process. Chromium already
+    // requests focus for it and already pauses/resumes correctly on a
+    // genuine external interruption (phone call, another app's playback)
+    // per its own focus-loss handling -- that's not this app's job to
+    // duplicate. When this service *also* held a request, its once-per-
+    // play-start requestAudioFocus() evicted Chromium's own request,
+    // Chromium (honoring focus-loss like any well-behaved player) paused
+    // the real <video>, and the very next Play tap made Chromium
+    // re-request focus and evict *this app's* request right back --
+    // AUDIOFOCUS_LOSS_TRANSIENT landing on this app within milliseconds
+    // of every tap, unconditionally re-pausing. Two correctly-behaved
+    // focus requesters fighting over one stream. See
+    // docs/bugs-caught/BUG-0004-audio-focus-ping-pong.md.
+    //
+    // Removing the request doesn't lose real interruption handling:
+    // Chromium still owns and pauses the actual audio output on a
+    // genuine AUDIOFOCUS_LOSS, and MediaSessionCompat/the notification
+    // only need accurate *state*, which already arrives for free via the
+    // JS bridge's real play/pause/ended events -- see updatePlaybackState()
+    // below. ACTION_AUDIO_BECOMING_NOISY (headphone unplug) is unrelated
+    // to audio focus and is still handled directly, below.
 
     // Pauses when the active audio route disappears (headphones
     // unplugged, Bluetooth device disconnected) instead of carrying
@@ -137,7 +139,6 @@ class MediaPlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         ArkLogger.track(COMPONENT, "onCreate") {
-            audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             MediaNotificationFactory.ensureChannel(this)
 
             mediaSession = MediaSessionCompat(this, "ArkTubeMediaSession").apply {
@@ -201,12 +202,6 @@ class MediaPlaybackService : Service() {
 
     override fun onDestroy() {
         ArkLogger.track(COMPONENT, "onDestroy") {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.abandonAudioFocus(audioFocusListener)
-            }
             try {
                 unregisterReceiver(becomingNoisyReceiver)
             } catch (t: Throwable) {
@@ -237,22 +232,17 @@ class MediaPlaybackService : Service() {
      * throttled `timeupdate` tick (roughly once a second) for as long
      * as the video keeps playing, not just once when it actually
      * starts -- so this runs with `playing == true` continuously
-     * during normal playback, not just on the false->true edge.
-     * requestAudioFocus() below must only fire on that edge (tracked
-     * via `wasPlaying`): re-requesting AUDIOFOCUS_GAIN on every one
-     * of those repeated "still playing" reports competes with
-     * WebView/Chromium's own internal audio focus handling for the
-     * same <video> element it's actively playing, knocking Chromium's
-     * focus loose and making it pause the real HTML5 video -- which
-     * is what was showing up as playback pausing instantly and
-     * repeatedly right after starting. Same failure shape as the
-     * SurfaceView z-order bug elsewhere in this app: an operation
-     * that's only safe once per state transition was instead being
-     * re-run on every repeated report.
+     * during normal playback, not just on the false->true edge. That's
+     * fine for the session/notification update below, which is
+     * idempotent either way. It used to also matter for a native
+     * requestAudioFocus() call gated on that edge -- removed per
+     * docs/bugs-caught/BUG-0004-audio-focus-ping-pong.md, since holding
+     * a native AudioFocusRequest for audio Chromium's own WebView media
+     * stack already owns is what caused that bug, not how often this
+     * method fired.
      */
     fun updatePlaybackState(playing: Boolean, positionMs: Long, playbackSpeed: Float) {
         ArkLogger.track(COMPONENT, "updatePlaybackState(playing=$playing)") {
-            val wasPlaying = isPlaying
             isPlaying = playing
             val actions = PlaybackStateCompat.ACTION_PLAY or
                 PlaybackStateCompat.ACTION_PAUSE or
@@ -269,9 +259,6 @@ class MediaPlaybackService : Service() {
                     .build()
             )
             if (playing) {
-                if (!wasPlaying) {
-                    requestAudioFocus()
-                }
                 startForegroundWithNotification()
             } else {
                 updateNotification()
@@ -310,29 +297,6 @@ class MediaPlaybackService : Service() {
         .setActions(PlaybackStateCompat.ACTION_PLAY or PlaybackStateCompat.ACTION_PLAY_PAUSE)
         .setState(PlaybackStateCompat.STATE_PAUSED, 0, 1f)
         .build()
-
-    private fun requestAudioFocus() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val request = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                    .setOnAudioFocusChangeListener(audioFocusListener)
-                    .build()
-                    .also { audioFocusRequest = it }
-                audioManager.requestAudioFocus(request)
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.requestAudioFocus(
-                    audioFocusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN
-                )
-            }
-        } catch (t: Throwable) {
-            // Losing audio focus tracking isn't fatal to playback
-            // itself (Chromium still owns the actual audio output),
-            // just to how gracefully this app defers to other apps'
-            // audio -- worth a warning, not a crash.
-            ArkLogger.w(COMPONENT, "requestAudioFocus failed", t)
-        }
-    }
 
     private fun updateNotification() {
         try {

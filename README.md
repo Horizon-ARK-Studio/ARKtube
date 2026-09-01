@@ -127,6 +127,13 @@ mobile site already solves a problem, let it solve it. If the app
 needs something the site doesn't provide — real fullscreen, native
 media controls — add the smallest native layer necessary.
 
+That "smallest necessary" layer still has to agree with the WebView
+runtime underneath it about who owns what — this project's worst
+bugs so far were two well-behaved systems (this app's native code and
+Chromium's own media/layout handling) both claiming the same platform
+resource. See
+[`docs/Foundational/SYSTEM-DESIGN-AGREEMENTS.md`](docs/Foundational/SYSTEM-DESIGN-AGREEMENTS.md).
+
 ---
 
 ## License

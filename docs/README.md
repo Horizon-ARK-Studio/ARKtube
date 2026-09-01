@@ -2,6 +2,7 @@
 
 * [Foundational/PROBLEM-STATEMENT.md](Foundational/PROBLEM-STATEMENT.md) -- the design document: what ARKtube is, why it's built as a thin native shell around `m.youtube.com` instead of a rewrite, and why that specifically benefits low-end/older Android devices.
 * [Foundational/CODE-STYLE.md](Foundational/CODE-STYLE.md) -- how we write code: package-per-concern layout, when a GoF pattern earns its place, the try/catch/finally + `ArkLogger` logging convention, and where a new file should go.
+* [Foundational/SYSTEM-DESIGN-AGREEMENTS.md](Foundational/SYSTEM-DESIGN-AGREEMENTS.md) -- who's allowed to own what between this app's native layer and the WebView/Chromium runtime underneath it. The recurring root cause behind this project's worst bugs (BUG-0001, BUG-0004) is two well-behaved systems both claiming the same platform resource; this doc names that failure shape once so it stops recurring at the PR level.
 * [bugs-caught/README.md](bugs-caught/README.md) -- active bug tracker. Bugs stay listed here until fixed, tested, and confirmed working.
 
 ---

@@ -55,7 +55,7 @@ Template:
   possibly self-reasserting — `Low`, unconfirmed, needs dedicated repro.
 - [BUG-0004](./BUG-0004-audio-focus-ping-pong.md): Native `AudioFocusRequest` fights
   WebView's own focus request, causing an immediate re-pause on every Play tap —
-  `Critical`, diagnostic logging added, root cause traced but unconfirmed on-device.
+  `Critical`, fix implemented (native request removed entirely), unverified on-device.
 - [BUG-0005](./BUG-0005-fullscreen-exit-page-reflow-gap.md): YouTube's page-side
   player-layout JS stays in landscape/fullscreen mode after exiting native fullscreen —
   `Medium`, fix implemented, unverified on-device.

@@ -1,6 +1,6 @@
 # BUG-0004: Native AudioFocusRequest fights WebView's own focus request, causing an immediate re-pause on every Play tap
 
-- **Status:** `FIX IMPLEMENTED (diagnostic only), UNVERIFIED ON-DEVICE`
+- **Status:** `FIX IMPLEMENTED, UNVERIFIED ON-DEVICE`
 - **Found:** 2026-09-01
 - **Location:** `android-project/app/src/main/java/com/arktube/app/MediaPlaybackService.kt`
   — `audioFocusListener` (~line 108) and `requestAudioFocus()` (~line 305)
@@ -59,29 +59,54 @@ honoring focus-loss per platform etiquette — which is exactly what makes them 
 
 ## Fix
 
-**Diagnostic only so far**, per this repo's own rule against patching on a guess:
-`audioFocusListener` now logs `onAudioFocusChange focusChange=$focusChange` on every
-callback. Correlate against `MediaSessionCoordinator`/`onPlayCommand` log timestamps on
-next repro — `LOSS_TRANSIENT` landing within milliseconds of every play tap confirms
-this root cause.
+Implemented: `MediaPlaybackService` no longer holds a native `AudioFocusRequest` at
+all. Removed `requestAudioFocus()`, the `audioFocusListener`
+(`OnAudioFocusChangeListener`), the `audioFocusRequest` field, the now-unused
+`audioManager` field, and the abandon calls in `onDestroy()`. This app was never the
+only legitimate owner of focus for the `<video>` element's audio stream — Chromium's
+own WebView media stack already requests it and already pauses/resumes correctly on a
+genuine external interruption (a call starting, another app's playback), per the
+platform's own etiquette. Holding a second, competing `AudioFocusRequest` for the same
+physical stream bought this app nothing and caused the ping-pong. See
+`docs/Foundational/SYSTEM-DESIGN-AGREEMENTS.md` — this is that document's namesake
+failure shape: two well-behaved systems both claiming the same platform resource.
 
-**Real fix, not yet implemented:** stop holding a native `AudioFocusRequest` for audio
-that Chromium's own WebView media stack already owns and already correctly
-pauses/resumes on genuine external interruptions. `ACTION_AUDIO_BECOMING_NOISY`
-(already handled separately, unaffected by this bug) covers the headphone-unplug case
-independently. `MediaSessionCompat`/the notification only need accurate *state*, which
-already arrives for free via the JS bridge's real `play`/`pause`/`ended` events — they
-don't require this app to also hold platform audio focus.
+`ACTION_AUDIO_BECOMING_NOISY` (headphone unplug / Bluetooth disconnect) is unrelated to
+audio focus and is untouched — still registered/handled directly in
+`becomingNoisyReceiver`, same as before. `MediaSessionCompat`/the notification still
+reflect accurate play/pause *state*, which arrives for free via the JS bridge's real
+`play`/`pause`/`ended` events through `updatePlaybackState()` — that path never needed
+platform audio focus to stay truthful, only the erroneous *request* did.
 
 ## Test
 
-Add the log line (done), reproduce, confirm `LOSS_TRANSIENT` correlates with each
-re-pause. Then, once `requestAudioFocus()`/`audioFocusListener` are removed or
-reworked: play a video, background/foreground the app, and separately trigger a real
-interruption (incoming call) to confirm legitimate focus loss still pauses correctly
-without the native request in the loop.
+Not yet run on-device. To confirm:
+
+1. Play a video. Confirm it does **not** self-pause shortly after starting (the
+   original symptom).
+2. Tap Play from the notification, lock screen, and in-page repeatedly. Confirm it
+   stays playing instead of re-pausing within milliseconds of each tap.
+3. Background/foreground the app during playback — confirm playback and transport
+   controls remain correct.
+4. Trigger a genuine external interruption (incoming call, another media app starting
+   playback) — confirm Chromium still pauses the video correctly (via its own focus
+   handling, no longer this app's), and that resuming afterward still works from both
+   the page and the native transport controls.
+5. Unplug headphones / disconnect Bluetooth mid-playback — confirm
+   `ACTION_AUDIO_BECOMING_NOISY` still pauses correctly (unrelated code path,
+   regression check only).
+
+Per this repo's own bug-tracker rules
+(`docs/bugs-caught/README.md` → Verification Standard), this entry stays listed as
+**unverified** — not removed — until the above steps pass on a real device.
 
 ## Notes
 
-Reported and diagnosed in conversation; not yet reproduced against a fresh on-device
-capture with the new log line.
+Root-cause diagnosis (conversation) traced this to a two-owner conflict over one
+`AudioManager` focus slot: Chromium's own WebView media stack vs. this app's native
+`AudioFocusRequest`. The prior diagnostic-only revision added a log line to confirm
+`LOSS_TRANSIENT` timing before committing to a fix; that diagnostic is now moot since
+the request-holding code it was instrumenting has been removed outright rather than
+reworked. Generalized as a named class of bug (not just this one instance) in the new
+`docs/Foundational/SYSTEM-DESIGN-AGREEMENTS.md`, alongside BUG-0001's SurfaceView/
+decoder churn, which is the same failure shape over a different platform resource.
