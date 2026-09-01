@@ -94,7 +94,28 @@ reap_stale_chrome() {
 reap_stale_chrome
 trap reap_stale_chrome EXIT INT TERM
 
-"${HERE}/ARKtube-bin" --path="${ARKTUBE_DATA_DIR}"
+# --- Close-button lifecycle coupling -------------------------------------
+# Mirrors packaging/linux/AppRun: chrome.cpp launches Chrome as a fully
+# detached process with no path back to the server, so closing Chrome's
+# own native window never tells the Neutralino server to exit on its own.
+# Watch for Chrome's process (same profile-dir match as reap_stale_chrome)
+# alongside the server, so this app exits as one unit regardless of which
+# side is closed first, instead of leaving an invisible orphaned server
+# process running after every ordinary close-button click.
+"${HERE}/ARKtube-bin" --path="${ARKTUBE_DATA_DIR}" &
+NEUTRALINO_PID=$!
+
+sleep 3
+
+while kill -0 "${NEUTRALINO_PID}" 2>/dev/null; do
+    if ! pgrep -f -- "${CHROME_LOCK_PATTERN}" >/dev/null 2>&1; then
+        kill -TERM "${NEUTRALINO_PID}" 2>/dev/null || true
+        break
+    fi
+    sleep 1
+done
+
+wait "${NEUTRALINO_PID}" 2>/dev/null || true
 LAUNCHER
 chmod 755 "${APP_DIR}/Contents/MacOS/ARKtube"
 

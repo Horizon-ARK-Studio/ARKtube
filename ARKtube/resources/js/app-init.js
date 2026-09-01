@@ -86,6 +86,89 @@
         }
     }
 
+    // --- On-screen fullscreen button -------------------------------------
+    //
+    // The app now boots maximized (--start-maximized, see
+    // neutralino.config.json) rather than auto-entering true fullscreen, so
+    // the taskbar/dock stays visible until the user explicitly asks for
+    // fullscreen. This button is that explicit ask for anyone without a
+    // keyboard/remote handy -- it calls the exact same toggleFullScreen()
+    // function F11 already does (see onKeyDown below), not a second
+    // implementation of the same idea.
+    const FULLSCREEN_BTN_ID = "arktube-fullscreen-btn";
+
+    function updateFullscreenButtonVisibility() {
+        const btn = document.getElementById(FULLSCREEN_BTN_ID);
+        if (!btn) {
+            return;
+        }
+        // document.fullscreenElement only reflects HTML5 Fullscreen API
+        // state -- the active path in chrome mode, which is this app's
+        // actual default mode. Native window mode has no equivalent DOM
+        // signal to poll cheaply, so the button is simply left visible
+        // there rather than guessing at native window state.
+        const alreadyFullscreen = !isNativeWindowMode() && !!document.fullscreenElement;
+        btn.style.display = alreadyFullscreen ? "none" : "block";
+    }
+
+    function insertFullscreenButton() {
+        if (document.getElementById(FULLSCREEN_BTN_ID)) {
+            return;
+        }
+
+        const btn = document.createElement("button");
+        btn.id = FULLSCREEN_BTN_ID;
+        btn.type = "button";
+        btn.title = "Enter fullscreen (F11)";
+        btn.textContent = "\u26F6"; // ⛶
+        // Stays out of the TV UI's own D-pad/arrow-key navigation order
+        // (see the Gamepad section below for why this app avoids teaching
+        // youtube.com/tv a second input model) -- click/touch only, by
+        // design, not by omission.
+        btn.tabIndex = -1;
+
+        Object.assign(btn.style, {
+            position: "fixed",
+            bottom: "16px",
+            right: "16px",
+            zIndex: "2147483647",
+            width: "44px",
+            height: "44px",
+            borderRadius: "50%",
+            border: "none",
+            background: "rgba(0, 0, 0, 0.55)",
+            color: "#fff",
+            fontSize: "20px",
+            lineHeight: "44px",
+            textAlign: "center",
+            padding: "0",
+            cursor: "pointer",
+            opacity: "0.55",
+            transition: "opacity 0.15s ease"
+        });
+        btn.addEventListener("mouseenter", () => { btn.style.opacity = "1"; });
+        btn.addEventListener("mouseleave", () => { btn.style.opacity = "0.55"; });
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleFullScreen();
+        });
+
+        document.body.appendChild(btn);
+        document.addEventListener("fullscreenchange", updateFullscreenButtonVisibility);
+        updateFullscreenButtonVisibility();
+    }
+
+    function initFullscreenButton() {
+        if (document.body) {
+            insertFullscreenButton();
+        } else {
+            // Defensive: injectScript timing relative to document readiness
+            // isn't guaranteed on a page this app doesn't control.
+            document.addEventListener("DOMContentLoaded", insertFullscreenButton, { once: true });
+        }
+    }
+
     async function exitFullScreenIfActive() {
         try {
             if (isNativeWindowMode()) {
@@ -379,6 +462,7 @@
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("resize", onWindowResize);
     initGamepadSupport();
+    initFullscreenButton();
 
     // TODO: https://github.com/neutralinojs/neutralinojs/issues/615
     if (NL_OS !== "Darwin") {

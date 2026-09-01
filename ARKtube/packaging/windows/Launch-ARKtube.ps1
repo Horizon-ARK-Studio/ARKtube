@@ -52,7 +52,29 @@ Remove-StaleChrome
 
 try {
     $exe = Join-Path $Here "ARKtube.exe"
-    Start-Process -FilePath $exe -ArgumentList "--path=`"$DataDir`"" -Wait
+    $proc = Start-Process -FilePath $exe -ArgumentList "--path=`"$DataDir`"" -PassThru
+
+    # --- Close-button lifecycle coupling ---------------------------------
+    # ARKtube.exe (the Neutralino server) launches Chrome/Edge as a fully
+    # detached child process with no path back to the server, so closing
+    # the browser's own native window never tells ARKtube.exe to exit on
+    # its own -- a plain -Wait here would block until the server happens
+    # to exit by itself, leaving it running invisibly in the background
+    # after every ordinary close-button click. Poll for the browser
+    # process (same CommandLine match Remove-StaleChrome already uses)
+    # alongside the server, and stop the server the moment the browser
+    # side disappears, so the app exits as one unit either way.
+    Start-Sleep -Seconds 3
+    while (-not $proc.HasExited) {
+        $chromeAlive = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine.Contains($ChromeLockPattern) }
+        if (-not $chromeAlive) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+    $proc.WaitForExit()
 } finally {
     # And clean up after this run however it ends, so the next launch
     # doesn't inherit the problem.
