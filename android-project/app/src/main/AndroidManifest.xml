@@ -8,6 +8,23 @@
          access, not just a local asset loader. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Lets MediaPlaybackService run as a foreground service while
+         video is actually playing -- required for the OS to treat its
+         MediaSessionCompat/notification as a genuine active media
+         session that the lock screen, Bluetooth AVRCP devices, and
+         wired headset buttons can address. FOREGROUND_SERVICE_MEDIA_PLAYBACK
+         (API 34+) is the specific typed variant startForeground()
+         declares itself as there; FOREGROUND_SERVICE covers older
+         API levels that don't require a type-specific permission. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Only gates whether the media notification itself can be
+         *shown* on Android 13+ -- MediaSessionCompat, and therefore
+         lock-screen/Bluetooth/wired transport control, works with or
+         without this being granted. Requested at runtime in
+         MainActivity.onCreate(). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:name=".ArkTubeApplication"
         android:allowBackup="true"
@@ -28,5 +45,25 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Hosts the MediaSessionCompat/notification for OS-level
+             play/pause/seek transport control -- see
+             MediaPlaybackService's own class doc. The MEDIA_BUTTON
+             intent-filter is what lets MediaButtonReceiver.
+             buildMediaButtonPendingIntent() (used for the
+             notification's own transport buttons, and by the system
+             for wired-headset/Bluetooth AVRCP key events) resolve to
+             this service; android:exported="true" is required for a
+             component with an intent-filter under targetSdk 34, and
+             matches how those external button-press intents actually
+             need to reach it. -->
+        <service
+            android:name=".MediaPlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

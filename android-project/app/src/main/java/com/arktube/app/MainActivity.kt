@@ -1,11 +1,19 @@
 package com.arktube.app
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.SurfaceView
@@ -18,6 +26,8 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -128,10 +138,30 @@ import androidx.core.view.WindowInsetsControllerCompat
  *    rotation, instead of leaving it stuck at the pre-rotation width
  *    until the user happens to scroll it into view -- see
  *    onConfigurationChanged()/forceLayoutReflow()
+ *  - exposes the currently playing video to the rest of the OS as a
+ *    real MediaSessionCompat, so play/pause/seek/skip reach it from
+ *    outside the app entirely: the lock screen, the notification
+ *    shade, a wired headset's inline remote, a Bluetooth
+ *    earbud/car-stereo's AVRCP buttons, a paired watch -- anything
+ *    the platform considers "a device that can control the active
+ *    media session". MEDIA_SESSION_JS watches the page's own <video>
+ *    element (play/pause/seeked/timeupdate/loadedmetadata) and
+ *    reports state/title/artwork back over the ArkTubeMediaPlayback
+ *    bridge; MediaPlaybackService owns the actual MediaSessionCompat,
+ *    the MediaStyle notification, and audio-focus/becoming-noisy
+ *    handling, translating session callbacks back into JS calls on
+ *    that same <video> element via MainActivity's
+ *    MediaPlaybackService.CommandListener implementation. Runs as a
+ *    bound (not yet foreground) service from onCreate, and is only
+ *    promoted into the foreground -- posting the actual notification
+ *    -- the first time the page reports real playback, not eagerly on
+ *    launch, so there's never a "nothing's playing" notification
+ *    sitting in the shade. See buildMediaPlaybackService... calls in
+ *    onCreate/onDestroy and MediaPlaybackService.kt.
  *
- * Explicitly out of scope for Stage 0 (future stages, see the
+ * Explicitly out of scope even with the above (future stages, see the
  * repo-root roadmap): a persistent nav shell/sidebar, download
- * interception, PiP, media-session/notification controls,
+ * interception, PiP, a real playlist/queue or Android Auto browsing,
  * chromecast, ad-blocking, or any custom UI layered over the page.
  */
 class MainActivity : AppCompatActivity() {
@@ -175,6 +205,57 @@ class MainActivity : AppCompatActivity() {
     // the next session before its own first report arrives.
     private var lastVideoWidth = 0
     private var lastVideoHeight = 0
+
+    // MediaPlaybackService owns the actual MediaSessionCompat/
+    // notification; MainActivity just binds to it so the two can pass
+    // messages both ways -- see the class doc's MediaSessionCompat
+    // bullet, mediaServiceConnection, and mediaCommandListener below.
+    private var mediaService: MediaPlaybackService? = null
+    private var mediaServiceBound = false
+
+    private val mediaServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName, binder: IBinder) {
+            val service = (binder as MediaPlaybackService.LocalBinder).service
+            mediaService = service
+            service.setCommandListener(mediaCommandListener)
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            // The system only calls this on an actual crash of the
+            // service's process, not on our own unbindService() call
+            // in onDestroy() -- but null it out regardless so a
+            // stray late callback can't reach a dead binder.
+            mediaService = null
+        }
+    }
+
+    // Translates MediaSessionCompat callbacks (from the lock screen,
+    // a Bluetooth headset's AVRCP buttons, the notification's own
+    // transport controls, etc.) into JS calls against the page's real
+    // <video> element -- the actual thing playing. See
+    // MEDIA_CONTROL_PLAY_JS and friends below for what each of these
+    // runs.
+    private val mediaCommandListener = object : MediaPlaybackService.CommandListener {
+        override fun onPlayCommand() {
+            runOnUiThread { webView.evaluateJavascript(MEDIA_CONTROL_PLAY_JS, null) }
+        }
+
+        override fun onPauseCommand() {
+            runOnUiThread { webView.evaluateJavascript(MEDIA_CONTROL_PAUSE_JS, null) }
+        }
+
+        override fun onSeekToCommand(positionMs: Long) {
+            runOnUiThread { webView.evaluateJavascript(mediaControlSeekJs(positionMs), null) }
+        }
+
+        override fun onFastForwardCommand() {
+            runOnUiThread { webView.evaluateJavascript(mediaControlSkipJs(SEEK_STEP_SECONDS), null) }
+        }
+
+        override fun onRewindCommand() {
+            runOnUiThread { webView.evaluateJavascript(mediaControlSkipJs(-SEEK_STEP_SECONDS), null) }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // Must be called before super.onCreate() -- swaps
@@ -283,6 +364,15 @@ class MainActivity : AppCompatActivity() {
         // zoom-to-fill crop in applyNativeZoomCrop() has the video's
         // intrinsic size to work from.
         webView.addJavascriptInterface(OrientationBridge(), "ArkTubeOrientation")
+        // Lets MEDIA_SESSION_JS hand the page's actual <video>
+        // play/pause/seek state and title/artwork back to native
+        // code, so MediaPlaybackService's MediaSessionCompat -- and
+        // therefore the lock screen, notification, and any connected
+        // Bluetooth/wired transport controls -- stays truthful about
+        // what's really happening on the page, not just a mirror of
+        // whatever command was last sent to it (the user can just as
+        // well hit YouTube's own on-page pause button).
+        webView.addJavascriptInterface(MediaPlaybackBridge(), "ArkTubeMediaPlayback")
 
         webView.webViewClient = object : WebViewClient() {
             // YouTube's fullscreen button doesn't hand the WebView a
@@ -300,6 +390,15 @@ class MainActivity : AppCompatActivity() {
                 view.evaluateJavascript(VIDEO_SIZE_REPORT_JS, null)
                 view.evaluateJavascript(THEME_SYNC_JS, null)
                 view.evaluateJavascript(HIDE_OPEN_APP_JS, null)
+                // MEDIA_SESSION_JS deliberately does NOT live inside
+                // the fullscreen-only customView path -- the actual
+                // <video> element it watches stays in the DOM and
+                // keeps firing play/pause/timeupdate regardless of
+                // whether fullscreen (a purely native mirror of that
+                // same element) is active, so installing it once per
+                // page load here covers both in-page and fullscreen
+                // playback with the same listeners.
+                view.evaluateJavascript(MEDIA_SESSION_JS, null)
             }
         }
         webView.webChromeClient = object : WebChromeClient() {
@@ -395,6 +494,53 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.loadUrl(SITE_URL)
+
+        // Only a *bound* (not yet foreground) service at this point --
+        // no notification exists until MediaPlaybackBridge reports
+        // real playback starting, in onPlaybackState() below. Binding
+        // this early just gets mediaCommandListener wired up before
+        // the user could possibly reach a play button.
+        bindService(
+            Intent(this, MediaPlaybackService::class.java),
+            mediaServiceConnection,
+            Context.BIND_AUTO_CREATE
+        )
+        mediaServiceBound = true
+
+        // Notification permission is only needed to actually *show*
+        // the media notification (Android 13+) -- MediaSessionCompat
+        // itself, and therefore lock-screen/Bluetooth/wired-headset
+        // transport control, works regardless of whether this is
+        // granted, so there's nothing else gated on the result.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST_CODE
+            )
+        }
+    }
+
+    /**
+     * Tears down the MediaPlaybackService binding/lifecycle.
+     *
+     * unbindService() alone isn't enough cleanup: once
+     * onPlaybackState() below has called startForegroundService() at
+     * least once, the service is independently "started" and outlives
+     * being unbound (that's what lets it survive brief Activity
+     * recreation) -- so this also explicitly stops it, same as
+     * bindService()'s BIND_AUTO_CREATE is paired with an explicit
+     * unbind rather than relying on either side to infer the other.
+     */
+    override fun onDestroy() {
+        super.onDestroy()
+        if (mediaServiceBound) {
+            mediaService?.setCommandListener(null)
+            unbindService(mediaServiceConnection)
+            mediaServiceBound = false
+        }
+        stopService(Intent(this, MediaPlaybackService::class.java))
     }
 
     @Suppress("DEPRECATION")
@@ -804,6 +950,67 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // Receives play/pause/seek state and title/artwork from
+    // MEDIA_SESSION_JS, watching the page's own <video> element --
+    // the one piece of this feature that has to come from JS, since
+    // "is this <video> actually playing right now" and "what's its
+    // title" are DOM-only facts native code has no other way to
+    // observe. Everything downstream (the actual MediaSessionCompat,
+    // notification, audio focus) lives in MediaPlaybackService.
+    private inner class MediaPlaybackBridge {
+        @JavascriptInterface
+        fun onPlaybackState(isPlaying: Boolean, positionMs: Long, playbackRate: Float) {
+            runOnUiThread {
+                if (isPlaying) {
+                    // Promotes the already-bound service into the
+                    // foreground -- and therefore posts the actual
+                    // notification -- the first time real playback is
+                    // reported, not eagerly back in onCreate. Safe to
+                    // call again on every subsequent play too:
+                    // starting an already-running service just
+                    // re-delivers onStartCommand.
+                    ContextCompat.startForegroundService(
+                        this@MainActivity, Intent(this@MainActivity, MediaPlaybackService::class.java)
+                    )
+                }
+                mediaService?.updatePlaybackState(isPlaying, positionMs, playbackRate)
+            }
+        }
+
+        @JavascriptInterface
+        fun onMediaInfo(title: String?, durationMs: Long, artworkUrl: String?) {
+            runOnUiThread { loadArtworkAndApplyMetadata(title, durationMs, artworkUrl) }
+        }
+    }
+
+    /**
+     * Fetches `artworkUrl` (the page's own og:image, i.e. the video's
+     * thumbnail) off the main thread and hands the decoded Bitmap --
+     * or null if there wasn't one or it failed to load -- to
+     * MediaPlaybackService along with the rest of the metadata, for
+     * the lock screen/notification's album-art slot.
+     *
+     * Deliberately tolerant of failure (bad/missing URL, network
+     * error, decode failure): artwork is a nice-to-have for the
+     * notification, not something that should ever block title/
+     * duration from reaching the session.
+     */
+    private fun loadArtworkAndApplyMetadata(title: String?, durationMs: Long, artworkUrl: String?) {
+        val service = mediaService ?: return
+        if (artworkUrl.isNullOrBlank()) {
+            service.updateMetadata(title, durationMs, null)
+            return
+        }
+        Thread {
+            val artwork = try {
+                java.net.URL(artworkUrl).openStream().use { BitmapFactory.decodeStream(it) }
+            } catch (e: Exception) {
+                null
+            }
+            runOnUiThread { mediaService?.updateMetadata(title, durationMs, artwork) }
+        }.start()
+    }
+
     /**
      * Locks the activity to whichever orientation matches the
      * fullscreen video's own intrinsic shape -- landscape video gets
@@ -1165,6 +1372,146 @@ class MainActivity : AppCompatActivity() {
 
                 hideByText();
                 setInterval(hideByText, 1500);
+            })();
+        """
+
+        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 1001
+
+        // How far a native fast-forward/rewind transport command (the
+        // notification's/lock screen's skip buttons) moves the
+        // playhead. 10s matches the skip amount most media apps and
+        // the platform's own default RemoteControlClient behavior use.
+        private const val SEEK_STEP_SECONDS = 10
+
+        private const val MEDIA_CONTROL_PLAY_JS = """
+            (function() {
+                var v = document.querySelector('video');
+                if (v) { v.play(); }
+            })();
+        """
+
+        private const val MEDIA_CONTROL_PAUSE_JS = """
+            (function() {
+                var v = document.querySelector('video');
+                if (v) { v.pause(); }
+            })();
+        """
+
+        private fun mediaControlSeekJs(positionMs: Long): String = """
+            (function() {
+                var v = document.querySelector('video');
+                if (v) { v.currentTime = ${positionMs / 1000.0}; }
+            })();
+        """
+
+        private fun mediaControlSkipJs(deltaSeconds: Int): String = """
+            (function() {
+                var v = document.querySelector('video');
+                if (v) { v.currentTime = Math.max(0, v.currentTime + ($deltaSeconds)); }
+            })();
+        """
+
+        // Watches whichever <video> element YouTube is actually
+        // playing through -- the same element fullscreen mirrors
+        // natively, see VIDEO_SIZE_REPORT_JS's own comment -- and
+        // reports its play/pause state, position, title, and artwork
+        // back to MediaPlaybackBridge, so MediaPlaybackService's
+        // MediaSessionCompat (and therefore the lock screen,
+        // notification, and any connected Bluetooth/wired transport
+        // controls) stays truthful about what's really happening on
+        // the page, not just a mirror of the last command a native
+        // control sent it -- tapping YouTube's own on-page pause
+        // button has to update the lock screen exactly the same as
+        // tapping the lock screen's own pause button would.
+        //
+        // A MutationObserver re-finds the active <video> on every DOM
+        // change (YouTube swaps in a fresh element for autoplay-next
+        // rather than reusing one), same pattern as
+        // VIDEO_SIZE_REPORT_JS. timeupdate is throttled to roughly
+        // once a second -- it fires many times a second natively, and
+        // reporting every single tick would mean rebuilding the
+        // notification at that same rate for no real benefit: the
+        // system already interpolates a smoothly-advancing position
+        // between MediaSessionCompat updates using the playback
+        // speed, the same way a scrubber on any other media app does.
+        // play/pause/seeked/ended report immediately and unthrottled,
+        // since those are the transitions actually worth reflecting
+        // right away.
+        private const val MEDIA_SESSION_JS = """
+            (function() {
+                if (window.__arktubeMediaSessionInstalled) { return; }
+                window.__arktubeMediaSessionInstalled = true;
+
+                var attachedVideo = null;
+                var lastReportedTitle = null;
+                var lastTimeUpdateReportAt = 0;
+
+                function pageTitle() {
+                    // m.youtube.com's <title> is "<video title> -
+                    // YouTube" -- strip the suffix so the lock screen/
+                    // notification shows just the video's own name,
+                    // the way a native player would.
+                    var t = document.title || '';
+                    var stripped = t.replace(/\s*-\s*YouTube\s*${'$'}/, '');
+                    return stripped || t;
+                }
+
+                function artworkUrl() {
+                    var og = document.querySelector('meta[property="og:image"]');
+                    return og ? og.getAttribute('content') : null;
+                }
+
+                function reportInfo() {
+                    var video = attachedVideo;
+                    if (!video || !window.ArkTubeMediaPlayback) { return; }
+                    var title = pageTitle();
+                    if (title === lastReportedTitle) { return; }
+                    lastReportedTitle = title;
+                    var durationMs = isFinite(video.duration) ? Math.round(video.duration * 1000) : 0;
+                    window.ArkTubeMediaPlayback.onMediaInfo(title, durationMs, artworkUrl());
+                }
+
+                function reportState() {
+                    var video = attachedVideo;
+                    if (!video || !window.ArkTubeMediaPlayback) { return; }
+                    window.ArkTubeMediaPlayback.onPlaybackState(
+                        !video.paused && !video.ended,
+                        Math.round(video.currentTime * 1000),
+                        video.playbackRate || 1
+                    );
+                }
+
+                function reportStateThrottled() {
+                    var now = Date.now();
+                    if (now - lastTimeUpdateReportAt < 1000) { return; }
+                    lastTimeUpdateReportAt = now;
+                    reportState();
+                }
+
+                function attach(video) {
+                    if (!video || video === attachedVideo) { return; }
+                    attachedVideo = video;
+                    lastReportedTitle = null;
+                    ['play', 'pause', 'seeked', 'ended'].forEach(function(evt) {
+                        video.addEventListener(evt, reportState);
+                    });
+                    video.addEventListener('timeupdate', reportStateThrottled);
+                    video.addEventListener('loadedmetadata', reportInfo);
+                    video.addEventListener('durationchange', reportInfo);
+                    reportState();
+                    reportInfo();
+                }
+
+                function findVideo() {
+                    attach(document.querySelector('video'));
+                }
+
+                findVideo();
+                var observer = new MutationObserver(findVideo);
+                observer.observe(document.body, { childList: true, subtree: true });
+                document.addEventListener('loadedmetadata', function(e) {
+                    if (e.target && e.target.tagName === 'VIDEO') { attach(e.target); }
+                }, true);
             })();
         """
     }

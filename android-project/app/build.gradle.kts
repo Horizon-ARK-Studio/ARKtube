@@ -73,4 +73,8 @@ dependencies {
     // API) -- gives a consistent splash on API 24+ instead of only
     // API 31+, via Theme.ArkTubeApp.Starting below.
     implementation("androidx.core:core-splashscreen:1.0.1")
+    // MediaSessionCompat/MediaMetadataCompat/PlaybackStateCompat, the
+    // MediaStyle notification helper, and MediaButtonReceiver -- see
+    // MediaPlaybackService.
+    implementation("androidx.media:media:1.7.0")
 }
