@@ -28,6 +28,11 @@ jobs:
   assemble-debug:
     name: Assemble debug APK
     runs-on: ubuntu-latest
+    # Same reasoning as HAS_RELEASE_KEYSTORE below: `secrets` isn't
+    # allowed in a step's `if:`, only in `env:`, so this becomes a
+    # job-level env var the steps can branch on.
+    env:
+      HAS_DEBUG_KEYSTORE: ${{ secrets.DEBUG_KEYSTORE_B64 != '' }}
     defaults:
       run:
         working-directory: android-project
@@ -46,7 +51,19 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      # Optional -- only runs if the repo has a DEBUG_KEYSTORE_B64
+      # secret configured. Writes the decoded keystore to a
+      # workspace-local file that never leaves this job's runner.
+      - name: Decode debug keystore (optional)
+        if: ${{ env.HAS_DEBUG_KEYSTORE == 'true' }}
+        run: echo "${{ secrets.DEBUG_KEYSTORE_B64 }}" | base64 -d > debug.keystore
+
       - name: Assemble debug APK
+        env:
+          DEBUG_KEYSTORE_PATH: ${{ env.HAS_DEBUG_KEYSTORE == 'true' && 'debug.keystore' || '' }}
+          DEBUG_KEYSTORE_PASSWORD: ${{ secrets.DEBUG_KEYSTORE_PASSWORD }}
+          DEBUG_KEYSTORE_ALIAS: ${{ secrets.DEBUG_KEYSTORE_ALIAS }}
+          DEBUG_KEY_PASSWORD: ${{ secrets.DEBUG_KEY_PASSWORD }}
         run: gradle assembleDebug --no-daemon
 
       - name: Upload APK

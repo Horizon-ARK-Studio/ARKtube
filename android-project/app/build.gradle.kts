@@ -27,6 +27,12 @@ android {
     // the build instead of falling back to unsigned, same as the
     // local no-env-vars-at-all case does.
     val releaseStorePath = System.getenv("RELEASE_KEYSTORE_PATH")
+    // Same optional, env-var-driven pattern as release below, but for
+    // the debug keystore. Left unset, Gradle falls back to its own
+    // implicit auto-generated ~/.android/debug.keystore like before --
+    // this only kicks in when DEBUG_KEYSTORE_PATH is actually set (CI,
+    // via the decoded repo secret).
+    val debugStorePath = System.getenv("DEBUG_KEYSTORE_PATH")
     signingConfigs {
         if (!releaseStorePath.isNullOrBlank()) {
             create("release") {
@@ -34,6 +40,14 @@ android {
                 storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("RELEASE_KEY_ALIAS")
                 keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+        if (!debugStorePath.isNullOrBlank()) {
+            getByName("debug") {
+                storeFile = file(debugStorePath)
+                storePassword = System.getenv("DEBUG_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("DEBUG_KEYSTORE_ALIAS")
+                keyPassword = System.getenv("DEBUG_KEY_PASSWORD")
             }
         }
     }
