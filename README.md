@@ -209,6 +209,60 @@ resources and ships an `AppRun` wrapper. Don't hand-wrap the raw
 `docs/BUGS-CAUGHT.md` for why that reliably crashes on launch, and what
 the wrapper does about it.
 
+### Linux: building the .deb
+
+```bash
+cd ARKtube/
+neu update                       # fetch the pinned 6.8.0 binaries
+./packaging/linux/build-deb.sh
+```
+
+Produces `ARKtube-<version>-amd64.deb`, installable with
+`sudo apt install ./ARKtube-<version>-amd64.deb`. It installs a launcher
+at `/usr/bin/arktube`, a `.desktop` entry, and an icon, and points
+Neutralino's writable `.tmp` directory at `~/.local/share/ARKtube` the
+same way the AppImage's `AppRun` does.
+
+### Windows: building the .exe
+
+```powershell
+cd ARKtube/
+neu update                       # fetch the pinned 6.8.0 binaries
+./packaging/windows/build-exe.ps1
+```
+
+Produces `ARKtube-<version>-windows-x64.zip` containing a single
+self-contained `ARKtube.exe` (resources are embedded into the binary at
+build time, so there's nothing else to ship alongside it).
+
+### macOS: building the .dmg
+
+```bash
+cd ARKtube/
+neu update                       # fetch the pinned 6.8.0 binaries
+./packaging/macos/build-dmg.sh
+```
+
+Produces `ARKtube-<version>-macos.dmg` containing `ARKtube.app` (with an
+`Applications` symlink for drag-to-install). The app launches through a
+small wrapper that points Neutralino's writable `.tmp` directory at
+`~/Library/Application Support/ARKtube`, since `/Applications` itself
+isn't writable by a normal user.
+
+Every platform artifact above is also built automatically by
+`.github/workflows/stage0.yml` on every push to `main` and is
+downloadable from that workflow run's Artifacts section.
+
+### Controller / remote support
+
+`resources/js/app-init.js` polls the standard Gamepad API and re-dispatches
+D-pad, stick, and face-button input as the same `ArrowUp/Down/Left/Right`,
+`Enter`, `Escape`, and `Home` key events the keyboard handler already
+understands — so any game controller, or any remote that a platform
+exposes to the browser as a HID gamepad, drives the same youtube.com/tv
+navigation a keyboard does, with no separate input path to maintain.
+Connect/disconnect events are logged via `debug.log` for troubleshooting.
+
 ### Linux: hardware-accelerated playback
 
 ARKtube's webview is WebKitGTK, the same engine GNOME Web uses, and the

@@ -60,6 +60,7 @@
       "width": 1280,
       "height": 720,
       "args": "--user-agent=\"Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;\" --start-fullscreen",
+      "browserBinaryDarwin": "/Applications/Google Chrome.app",
       "injectScript": "/resources/js/app-init.js",
       "nativeBlockList": [
         "filesystem.*"

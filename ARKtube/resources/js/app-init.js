@@ -132,6 +132,187 @@
         }
     }
 
+    // --- Gamepad / joystick / TV-remote input --------------------------
+    //
+    // youtube.com/tv already drives its whole UI off keyboard events
+    // (ArrowUp/Down/Left/Right, Enter, Escape/Backspace - see
+    // onKeyDown above), so the simplest way to make a physical
+    // controller or an IR/Bluetooth remote that reports itself to the
+    // OS as a HID gamepad "just work" is to read it with the standard
+    // Gamepad API and re-dispatch the same synthetic KeyboardEvents
+    // that a real keyboard press would produce, instead of teaching
+    // the YouTube page a second input model. This runs happily in both
+    // window mode and chrome mode, since the Gamepad API is a normal
+    // browser API with no native/Neutralino dependency.
+    const GAMEPAD_BUTTON_TO_KEY = {
+        0: "Enter",       // A / Cross / Select / OK
+        1: "Escape",      // B / Circle / Back
+        12: "ArrowUp",    // D-pad up
+        13: "ArrowDown",  // D-pad down
+        14: "ArrowLeft",  // D-pad left
+        15: "ArrowRight", // D-pad right
+        9: "Home",        // Start / Options / Menu - treated as the remote's Home key
+        8: "Escape"       // Select / Back (second-controller layouts)
+    };
+
+    // Left-stick fallback for controllers that don't expose a D-pad as
+    // discrete buttons (axes[0] = horizontal, axes[1] = vertical).
+    const STICK_DEADZONE = 0.5;
+
+    const REPEAT_INITIAL_DELAY_MS = 400;
+    const REPEAT_INTERVAL_MS = 150;
+
+    // Per-key repeat state, keyed by the KeyboardEvent.key value it maps to.
+    const heldKeys = Object.create(null);
+    let gamepadPollHandle = null;
+    let connectedGamepadCount = 0;
+
+    function dispatchSyntheticKey(key) {
+        try {
+            window.dispatchEvent(new KeyboardEvent("keydown", {
+                key,
+                bubbles: true,
+                cancelable: true
+            }));
+        } catch (err) {
+            console.error("Error dispatching synthetic key event for gamepad input:", err);
+        }
+    }
+
+    function logGamepadEvent(message) {
+        console.log(message);
+        try {
+            if (typeof Neutralino !== "undefined" && Neutralino.debug && Neutralino.debug.log) {
+                Neutralino.debug.log(message);
+            }
+        } catch (err) {
+            // debug.log is best-effort only; never let logging break input handling.
+        }
+    }
+
+    function readActiveButtonKeys(gamepad) {
+        const active = [];
+
+        for (const [index, key] of Object.entries(GAMEPAD_BUTTON_TO_KEY)) {
+            const button = gamepad.buttons[index];
+            if (button && button.pressed) {
+                active.push(key);
+            }
+        }
+
+        // Only fall back to the analog stick when no D-pad button is
+        // already driving navigation, so the two input styles don't fight.
+        const dpadActive = active.some((k) =>
+            k === "ArrowUp" || k === "ArrowDown" || k === "ArrowLeft" || k === "ArrowRight"
+        );
+        if (!dpadActive && gamepad.axes && gamepad.axes.length >= 2) {
+            const [x, y] = gamepad.axes;
+            if (y <= -STICK_DEADZONE) active.push("ArrowUp");
+            else if (y >= STICK_DEADZONE) active.push("ArrowDown");
+            if (x <= -STICK_DEADZONE) active.push("ArrowLeft");
+            else if (x >= STICK_DEADZONE) active.push("ArrowRight");
+        }
+
+        return active;
+    }
+
+    function pollGamepads(timestamp) {
+        try {
+            const pads = (navigator.getGamepads && navigator.getGamepads()) || [];
+            const activeThisFrame = new Set();
+
+            for (const gamepad of pads) {
+                if (!gamepad) continue;
+                for (const key of readActiveButtonKeys(gamepad)) {
+                    activeThisFrame.add(key);
+                }
+            }
+
+            // Fire-on-press-and-repeat, mirroring how a held keyboard key
+            // or a held remote button auto-repeats, instead of flooding
+            // one synthetic keydown per animation frame (~60/sec).
+            for (const key of activeThisFrame) {
+                const state = heldKeys[key];
+                if (!state) {
+                    dispatchSyntheticKey(key);
+                    heldKeys[key] = { pressedAt: timestamp, lastRepeat: timestamp };
+                } else if (
+                    timestamp - state.pressedAt >= REPEAT_INITIAL_DELAY_MS &&
+                    timestamp - state.lastRepeat >= REPEAT_INTERVAL_MS
+                ) {
+                    dispatchSyntheticKey(key);
+                    state.lastRepeat = timestamp;
+                }
+            }
+
+            for (const key of Object.keys(heldKeys)) {
+                if (!activeThisFrame.has(key)) {
+                    delete heldKeys[key];
+                }
+            }
+        } catch (err) {
+            console.error("Error polling gamepad state:", err);
+        }
+
+        gamepadPollHandle = window.requestAnimationFrame(pollGamepads);
+    }
+
+    function startGamepadPolling() {
+        if (gamepadPollHandle === null) {
+            gamepadPollHandle = window.requestAnimationFrame(pollGamepads);
+        }
+    }
+
+    function stopGamepadPollingIfIdle() {
+        if (connectedGamepadCount <= 0 && gamepadPollHandle !== null) {
+            window.cancelAnimationFrame(gamepadPollHandle);
+            gamepadPollHandle = null;
+            for (const key of Object.keys(heldKeys)) {
+                delete heldKeys[key];
+            }
+        }
+    }
+
+    function onGamepadConnected(e) {
+        connectedGamepadCount += 1;
+        logGamepadEvent(
+            `Gamepad/remote connected: "${e.gamepad.id}" (index ${e.gamepad.index}, ` +
+            `${e.gamepad.buttons.length} buttons, ${e.gamepad.axes.length} axes)`
+        );
+        startGamepadPolling();
+    }
+
+    function onGamepadDisconnected(e) {
+        connectedGamepadCount = Math.max(0, connectedGamepadCount - 1);
+        logGamepadEvent(`Gamepad/remote disconnected: "${e.gamepad.id}" (index ${e.gamepad.index})`);
+        stopGamepadPollingIfIdle();
+    }
+
+    function initGamepadSupport() {
+        if (!("getGamepads" in navigator)) {
+            logGamepadEvent("Gamepad API not available in this environment; skipping controller/remote support.");
+            return;
+        }
+
+        window.addEventListener("gamepadconnected", onGamepadConnected);
+        window.addEventListener("gamepaddisconnected", onGamepadDisconnected);
+
+        // Some platforms (and some Bluetooth remotes that register as HID
+        // gamepads) never fire "gamepadconnected" for a pad that was
+        // already paired before the page loaded, so also check directly
+        // on init in case one is already sitting there.
+        try {
+            const pads = navigator.getGamepads() || [];
+            connectedGamepadCount = Array.from(pads).filter(Boolean).length;
+            if (connectedGamepadCount > 0) {
+                logGamepadEvent(`${connectedGamepadCount} gamepad/remote already connected at startup.`);
+                startGamepadPolling();
+            }
+        } catch (err) {
+            console.error("Error checking for already-connected gamepads:", err);
+        }
+    }
+
     let resizeSettleTimer = null;
 
     function onWindowResize() {
@@ -195,6 +376,7 @@
 
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("resize", onWindowResize);
+    initGamepadSupport();
 
     // TODO: https://github.com/neutralinojs/neutralinojs/issues/615
     if (NL_OS !== "Darwin") {

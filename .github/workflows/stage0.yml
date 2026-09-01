@@ -1,16 +1,19 @@
-name: Build AppImage
+name: Build Artifacts
 
-# Packages the ARKtube Neutralino shell into a Linux AppImage.
+# Packages the ARKtube Neutralino shell into downloadable artifacts for
+# every desktop platform: a Linux AppImage, a Linux .deb, a Windows
+# .exe (zipped), and a macOS .app bundled into a .dmg.
 #
-# This delegates to `neu build --embed-resources` and the
-# packaging/linux/ scripts (AppRun, build-appimage.sh) instead of hand
-# -assembling the AppDir here, so CI and a local build can never drift
-# apart again. See docs/BUGS-CAUGHT.md for why both of those matter:
-#   - `neu build --embed-resources` bakes resources.neu into the binary,
-#     so there's no separate resources file to lose track of.
-#   - packaging/linux/AppRun launches with a writable --path, so
-#     Neutralino's ./.tmp directory isn't created inside the read-only
-#     AppImage mount.
+# Each job delegates to `neu build --embed-resources` and the matching
+# packaging/<platform>/ script instead of hand-assembling anything here,
+# so CI and a local build can never drift apart. See
+# docs/BUGS-CAUGHT.md for why `--embed-resources` matters:
+#   - it bakes resources.neu into the binary, so there's no separate
+#     resources file to lose track of.
+#   - packaging/linux/AppRun (and the equivalent launch wrappers used
+#     by the .deb and .dmg builds) point Neutralino at a writable
+#     --path, so its ./.tmp directory isn't created somewhere
+#     read-only at runtime.
 
 on:
   push:
@@ -62,5 +65,109 @@ jobs:
         with:
           name: ARKtube-x86_64-AppImage
           path: ARKtube/ARKtube-x86_64.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+  build-deb:
+    name: Build ARKtube .deb (Linux amd64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ARKtube
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (WebKitGTK, dpkg-deb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-0 \
+            dpkg-dev
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Neutralino CLI
+        run: npm install -g @neutralinojs/neu
+
+      - name: Make prebuilt binaries executable
+        run: chmod +x bin/neutralino-linux_x64 bin/neutralino-linux_arm64 bin/neutralino-linux_armhf
+
+      - name: Build .deb
+        run: ./packaging/linux/build-deb.sh
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARKtube-amd64-deb
+          path: ARKtube/ARKtube-*-amd64.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    name: Build ARKtube .exe (Windows x64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: ARKtube
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Neutralino CLI
+        run: npm install -g @neutralinojs/neu
+
+      - name: Build and zip .exe
+        run: ./packaging/windows/build-exe.ps1
+        shell: pwsh
+
+      - name: Upload .exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARKtube-windows-x64
+          path: ARKtube/ARKtube-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  build-macos:
+    name: Build ARKtube .dmg (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: ARKtube
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Neutralino CLI
+        run: npm install -g @neutralinojs/neu
+
+      - name: Make prebuilt binaries executable
+        run: chmod +x bin/neutralino-mac_universal bin/neutralino-mac_x64 bin/neutralino-mac_arm64
+
+      - name: Build .dmg
+        run: ./packaging/macos/build-dmg.sh
+
+      - name: Upload .dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARKtube-macos
+          path: ARKtube/ARKtube-*-macos.dmg
           if-no-files-found: error
           retention-days: 14
