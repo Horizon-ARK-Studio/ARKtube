@@ -53,14 +53,16 @@
 
     // Neutralino.window.* only works when running in window mode -- per
     // Neutralino's own docs, "This namespace's methods will work only for
-    // the window mode." In chrome mode (this app's defaultMode) there's no
-    // Neutralino-owned native window handle for it to control, and the
-    // calls silently no-op instead of erroring (see
-    // neutralinojs/neutralinojs#751). That's why F11/Escape used to appear
-    // to do nothing, and why the *real* window being maximized/restored --
-    // the actual OS-native Chrome window -- was invisible to this script
-    // entirely. In chrome mode we're just a normal page in a real browser
-    // tab, so the standard DOM Fullscreen API is the correct tool instead.
+    // the window mode." That's exactly the mode this app now runs in by
+    // default (see neutralino.config.json / docs/BUGS-CAUGHT.md ยง9 for why
+    // it moved off chrome mode), so these calls control the app's own
+    // native window directly. They're kept mode-aware here only so this
+    // script still degrades correctly if someone opts back into chrome
+    // mode (see the same doc section) -- there, there's no Neutralino
+    // -owned native window handle for it to control, and the calls
+    // silently no-op instead of erroring (see
+    // neutralinojs/neutralinojs#751), so the standard DOM Fullscreen API
+    // is used as the fallback instead.
     function isNativeWindowMode() {
         return typeof NL_MODE !== "undefined" && NL_MODE === "window";
     }

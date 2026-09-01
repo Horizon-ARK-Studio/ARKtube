@@ -267,24 +267,27 @@ exposes to the browser as a HID gamepad, drives the same youtube.com/tv
 navigation a keyboard does, with no separate input path to maintain.
 Connect/disconnect events are logged via `debug.log` for troubleshooting.
 
-### Chrome-mode process lifecycle
+### Single-process app, not a separate browser window
 
-ARKtube's `defaultMode` is `chrome` (see `neutralino.config.json`), which
-runs the actual YouTube page in a separate Chrome/Chromium/Edge child
-process rather than Neutralino's own webview. That child process is
-launched fully detached from the Neutralino server process, so
-`Neutralino.app.exit()` (what `app-init.js` calls on window close) only
-ever terminates the Neutralino server - never the browser it spawned.
-Left alone, that leaks a browser process (and its profile lock) on any
-exit that isn't a clean quit through the app UI, and the next launch
-silently reattaches to the orphan instead of starting fresh. Every
-launcher this project ships - `packaging/linux/AppRun` (AppImage),
-`packaging/linux/build-deb.sh`'s `/usr/bin/arktube`,
-`packaging/macos/build-dmg.sh`'s `ARKtube.app` wrapper, and
-`packaging/windows/Launch-ARKtube.ps1` - reaps that orphaned process and
-its stale lock files both before and after each run. If you add another
-distribution channel, carry the same cleanup over; running the raw
-Neutralino binary directly (bypassing all of the above) will hit this.
+ARKtube's `defaultMode` is `window` (see `neutralino.config.json`), so
+YouTube loads inside Neutralino's own embedded webview — WebKitGTK on
+Linux, WebView2 on Windows, WKWebView on macOS — in the *same process*
+as the rest of the app, like any normal native desktop application.
+Closing ARKtube closes the whole thing; there's no second window or
+process hanging around after it.
+
+An earlier revision used `defaultMode: "chrome"`, which spawns
+Chrome/Chromium/Edge as a **separate, fully-detached child process** and
+loads YouTube in that instead — the Neutralino server itself is just a
+thin controller relaying window-lifecycle events to it. That's what let
+that child process get orphaned on anything but a clean in-app quit (see
+`docs/BUGS-CAUGHT.md` §5–§9 for the full history and the launcher-level
+workarounds that were needed to paper over it). Moving to window mode
+removes that entire class of problem rather than continuing to mitigate
+it — see `docs/BUGS-CAUGHT.md` §9 for the one real trade-off this
+brings (window mode can only *extend*, not fully replace, the webview's
+user agent, which chrome mode used to spoof a TV/Leanback identity) and
+how to switch back if you hit it.
 
 ### Linux: hardware-accelerated playback
 
@@ -397,14 +400,21 @@ The app loads YouTube directly as an external URL. The `documentRoot: "/resource
 
 ### Chrome Mode vs. Window Mode
 
-Both modes now include `app-init.js` injection and support for:
+`window` mode is the default (see "Single-process app, not a separate
+browser window" above and `docs/BUGS-CAUGHT.md` §9). Both modes still
+include `app-init.js` injection and support for:
 * Tray menu (VERSION, QUIT)
 * Window close handling
 * Fullscreen toggle (F11)
 
 Chrome mode additionally:
-* Launches with `--start-fullscreen` and PS4 user-agent
+* Launches with `--start-fullscreen` and a full PS4/Leanback user-agent
+  override (a full replacement, unlike window mode's `extendUserAgentWith`,
+  which can only append to the real user agent)
 * Blocks filesystem access for security
+* Runs YouTube in a separate, detached browser process rather than
+  Neutralino's own webview — see `docs/BUGS-CAUGHT.md` §5–§9 for what
+  that costs in process-lifecycle complexity
 ---
 
 This project contains original code written for the desktop shell and application layer.

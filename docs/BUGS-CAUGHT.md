@@ -253,3 +253,53 @@ This proposal does not touch:
   AppImage-specific),
 - YouTube's own frontend or player.
 
+## 9. Moving off chrome mode: a detached browser process isn't "an app"
+
+Sections 5–7 (and the equivalent fixes later added to the `.deb`, `.dmg`,
+and Windows launchers) all worked around the same underlying fact:
+`defaultMode: "chrome"` makes Neutralino spawn Chrome/Chromium/Edge as a
+**separate, fully-detached process** and load YouTube inside *that*,
+with the Neutralino server itself just relaying window-lifecycle events
+to it. Every fix up to this point made that arrangement more reliable
+(reaping orphans, persisting the profile), but it never stopped being
+two processes wearing one app's clothing — closable independently,
+killable independently, and only reunited by a `--user-data-dir` string
+match. That's a workaround, not the intended architecture.
+
+`defaultMode` is now `"window"`. In window mode, YouTube loads inside
+Neutralino's **own** embedded webview — WebKitGTK on Linux, WebView2 on
+Windows, WKWebView on macOS — running in the same process as the rest of
+the app, the same way any other native desktop application works.
+There is no second process to detach, orphan, or reap in the first
+place, so the entire class of bugs in §5–§7 doesn't apply to it. Native
+window behavior (title bar, taskbar/dock entry, real minimize/
+maximize/fullscreen via `Neutralino.window.*`, the system tray) now also
+works correctly, rather than silently no-opping the way it did under
+chrome mode (see the updated comment in `resources/js/app-init.js`).
+
+**The trade-off, stated plainly:** chrome mode's `args` could pass a
+full `--user-agent="Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa;
+compatible;"` override, which is how this app got youtube.com/tv to
+serve its full 10-foot "Leanback" TV interface instead of the regular
+desktop site. Window mode has no equivalent full-replacement option —
+Neutralino's webview only supports `extendUserAgentWith`, which
+*appends* a suffix to the platform's real WebKit/WebView2/WKWebView user
+agent string, not a full spoof (this is a Neutralino/webview-library
+limitation, not something this project's config can work around).
+`modes.window.extendUserAgentWith` is set to the same Cobalt/PS4
+fragment as a best-effort attempt, but because it now trails a real
+desktop browser signature instead of replacing it outright, YouTube's
+own server-side device detection may or may not still serve the
+Leanback UI for it — this hasn't been verified against a live YouTube
+response, since that detection logic is on Google's side and not
+something reproducible in this repo.
+
+If you find the app no longer renders the TV/Leanback interface after
+this change: `modes.chrome` is left fully intact in
+`neutralino.config.json` for exactly this reason. Set `"defaultMode"`
+back to `"chrome"` to restore the old spoofed-UA behavior — the
+`AppRun` / `build-deb.sh` / `build-dmg.sh` / `Launch-ARKtube.ps1`
+cleanup logic from §5–§7 was deliberately left in place (it's an
+inert no-op under window mode, since it only ever matches processes
+against this app's own chrome-profile directory) so that switching back
+doesn't reintroduce the orphaned-process bug either.

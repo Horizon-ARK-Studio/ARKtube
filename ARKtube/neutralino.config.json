@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
   "applicationId": "com.arktube.app",
   "version": "0.1.0",
-  "defaultMode": "chrome",
+  "defaultMode": "window",
   "port": 0,
   "documentRoot": null,
   "url": "https://www.youtube.com/tv#/",
@@ -29,7 +29,7 @@
       "minWidth": 960,
       "minHeight": 540,
       "center": true,
-      "fullScreen": false,
+      "fullScreen": true,
       "alwaysOnTop": false,
       "icon": "/resources/icons/appIcon.png",
       "enableInspector": true,
@@ -40,7 +40,8 @@
       "exitProcessOnClose": false,
       "injectGlobals": true,
       "injectClientLibrary": true,
-      "injectScript": "/resources/js/app-init.js"
+      "injectScript": "/resources/js/app-init.js",
+      "extendUserAgentWith": " Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;"
     },
     "browser": {
       "globalVariables": {
