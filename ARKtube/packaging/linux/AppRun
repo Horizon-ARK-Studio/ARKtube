@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# AppRun - AppImage entrypoint for ARKtube.
+#
+# Two jobs, both documented in docs/BUGS-CAUGHT.md:
+#
+#   1. Point Neutralino's NL_PATH at a writable directory instead of the
+#      read-only squashfs mount, so its internal ".tmp" working-storage
+#      directory can actually be created (avoids the
+#      "filesystem error: cannot create directories: Read-only file
+#      system [./.tmp]" abort).
+#   2. Make sure GPU compositing / accelerated video decode aren't
+#      silently disabled, so WebKitGTK's playback quality matches what
+#      Firefox gets on the same machine.
+#
+set -euo pipefail
+
+HERE="$(dirname "$(readlink -f "${0}")")"
+
+# --- 1. Writable NL_PATH -----------------------------------------------
+# XDG_DATA_HOME/ARKtube is created on first run if it doesn't exist yet.
+# Passing this via --path overrides NL_PATH inside the Neutralino binary,
+# so ./.tmp resolves under here instead of under the read-only AppImage
+# mount point ($HERE, which is /tmp/.mount_XXXXXXX/... at runtime).
+DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
+ARKTUBE_DATA_DIR="${DATA_HOME}/ARKtube"
+mkdir -p "${ARKTUBE_DATA_DIR}"
+
+# --- 2. Hardware-accelerated playback -----------------------------------
+# Unset anything inherited from the host environment that would force
+# software-only rendering.
+unset WEBKIT_DISABLE_COMPOSITING_MODE || true
+unset LIBGL_ALWAYS_SOFTWARE || true
+
+# Keep WebKit's accelerated DMA-BUF video frame path enabled instead of
+# falling back to the slower Cairo path.
+export WEBKIT_DISABLE_DMABUF_RENDERER=0
+
+# GStreamer's VA-API plugin only trusts a short hardcoded driver
+# allow-list by default; this is the most common reason "VA-API is
+# installed but not used" outside a handful of Intel chips.
+export GST_VAAPI_ALL_DRIVERS=1
+
+# LIBVA_DRIVER_NAME is deliberately NOT set here - forcing the wrong
+# value (e.g. iHD on an AMD/NVIDIA machine) breaks VA-API outright
+# instead of just leaving it unaccelerated. If a value is already set in
+# the environment (e.g. by the user, matching what they use for Firefox
+# or mpv), it's left alone and simply inherited below.
+
+exec "${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "$@"

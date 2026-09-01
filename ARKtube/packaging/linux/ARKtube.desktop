@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ARKtube
+Comment=ARKtube desktop app
+Exec=AppRun
+Icon=appIcon
+Categories=AudioVideo;Player;
+Terminal=false
+StartupNotify=true
