@@ -163,3 +163,28 @@ Proposed next diagnostic step (not yet performed): temporarily disable
 reproduce. If the ~2s stutter still occurs with zero native playback-control code in
 the loop, the cause is on the page/YouTube-player side, not in this app's Kotlin. If it
 stops, the bridge/native code is implicated after all and needs its own trace.
+
+**Second, distinct candidate found 2026-09-01 (unrelated to the theme-sync fix above,
+not yet investigated on-device):** `notifications/InboxScraper.kt` (driven by
+`NotificationSyncWorker`, a 30-minute `PeriodicWorkRequest`) constructs a **second,
+independent `WebView`** on the main thread, loads `m.youtube.com/feed/notifications`
+into it, and runs JS against it for up to a 20s timeout — entirely independent of
+whether `MainActivity`'s own WebView is in the foreground actively decoding video, since
+WorkManager has no knowledge of that. Two WebView instances in the same process share
+the underlying Chromium browser process and its GPU/codec resource pool, so a second
+instance loading and rendering a live page is a plausible source of exactly the kind of
+decoder resource contention this bug's captured trace shows (`Failed to query component
+interface for required system resources: 6` is a generic Codec2/`CCodec`
+resource-query-failure message, consistent with — though not uniquely diagnostic of —
+contention between concurrent codec consumers). This does **not** fit the tight, steady
+~2.1s loop cadence on its own (a 30-minute-interval, single ~20s-timeout job can't
+produce a repeating 2-second cycle) so it should be treated as a possible *compounding*
+factor, not a replacement for the theme-sync root cause above — but it is a much more
+literal match for the specific captured error string than window/inset churn is, and it
+directly explains this bug's own unresolved loose end: *"later in the session (after the
+app was backgrounded ~5 minutes and brought back...) the cadence changed"* — a
+30-minute-periodic background job landing near a resume-from-background is exactly the
+kind of one-off event that would perturb the pattern without itself being periodic at
+2s. Next step: correlate `NotificationSyncWorker`/`InboxScraper` log timestamps
+(`ArkLogger` tags `NotificationSyncWorker`/`InboxScraper`) against churn-loop windows in
+a capture; if they never overlap, this candidate is ruled out.

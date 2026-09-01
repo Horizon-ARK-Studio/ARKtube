@@ -12,18 +12,54 @@ or build it from the command line once you have a JDK:
 
 ## What's here
 
-- `app/src/main/java/com/arktube/app/MainActivity.kt` — the whole
-  app: a `WebView` pointed straight at `https://m.youtube.com` over
-  plain HTTPS. Unlike a bundled-site shell, there's no `assets/`
-  folder and no `WebViewAssetLoader` here — ARKtube's whole point is
-  to wrap the *live* site, not ship a copy of it, so this needs the
-  `INTERNET` permission (declared in `AndroidManifest.xml`) rather
-  than local asset serving. Beyond just loading the site, it also:
-  - Crops fullscreen video to fill the screen instead of YouTube's
-    letterboxed default, by comparing the video's own intrinsic
-    pixel size to its container and scaling with a CSS transform
-    (never touching the layout box YouTube's own controls hit-test
-    against).
+- `app/src/main/java/com/arktube/app/MainActivity.kt` — a `WebView`
+  pointed straight at `https://m.youtube.com` over plain HTTPS.
+  Unlike a bundled-site shell, there's no `assets/` folder and no
+  `WebViewAssetLoader` here — ARKtube's whole point is to wrap the
+  *live* site, not ship a copy of it, so this needs the `INTERNET`
+  permission (declared in `AndroidManifest.xml`) rather than local
+  asset serving. `MainActivity` itself is now a thin Activity-lifecycle
+  shell; the actual behavior lives in single-responsibility
+  collaborators under `com.arktube.app` (see each package's own class
+  docs for the full *why*):
+  - `fullscreen/` — everything about fullscreen video:
+    `FullscreenVideoController` (facade), `SurfaceViewZOrderNeutralizer`
+    (lets the native stretch-to-fill button paint/receive touches above
+    Chromium's hardware-composited fullscreen `SurfaceView`),
+    `ZoomCropStrategy`/`LetterboxZoomCropStrategy` (crops fullscreen
+    video to fill the screen instead of YouTube's letterboxed default,
+    by comparing the video's own intrinsic pixel size to its container
+    and scaling the native customView with `View.scaleX`/`scaleY` — an
+    earlier revision tried this via a CSS transform on the page side
+    instead; that never worked on-device, since once YouTube's player
+    goes fullscreen WebView promotes the video out of the DOM entirely,
+    onto a native View page CSS can no longer reach at all), and
+    `StretchToggleButtonFactory` (a manual override button for content
+    the automatic crop doesn't catch, e.g. letterbox/pillarbox baked
+    into the source video itself rather than added by YouTube's
+    player — see `docs/bugs-caught/`).
+  - `webview/` — `ArkTubeWebViewFactory` (builds the WebView + its
+    settings) and `webview/bridge/` (the `@JavascriptInterface` bridges
+    JS uses to report theme, fullscreen video size, and playback state
+    back to native code); `ArkTubeScripts` holds every script injected
+    into the page.
+  - `theme/` — syncs the status/nav bar color to whichever theme
+    YouTube itself is rendering (its own light/dark toggle, not the
+    phone's system theme).
+  - `layout/LayoutReflowHelper` — forces YouTube's off-screen list
+    items to re-measure after a rotation.
+  - `notifications/` — `NotificationSyncWorker`, a 30-minute WorkManager
+    job that polls the signed-in user's own YouTube notification inbox
+    (via a short-lived headless second `WebView`, reusing the same
+    session cookies rather than a separate OAuth sign-in — see
+    `InboxScraper`'s class doc) and mirrors new items as native Android
+    notifications.
+  - `prefs/` — persisted stretch-to-fill toggle and notification-sync
+    "already seen" state.
+  - `logging/ArkLogger` — app-wide logger; mirrors warnings/errors to
+    an on-device file in addition to Logcat.
+
+  Beyond loading the site, this also:
   - Goes truly edge-to-edge in fullscreen — hides the status bar,
     nav bar (gesture pill or 3-button), *and* draws under the
     notch/camera cutout — rather than just hiding the WebView's own
@@ -37,11 +73,14 @@ or build it from the command line once you have a JDK:
     the phone's system auto-rotate lock rather than deferring to it.
     Restores whatever orientation you were in before once fullscreen
     ends.
-  - Syncs the status/nav bar color to whichever theme YouTube itself
-    is rendering (its own light/dark toggle, not the phone's system
-    theme).
   - Hides YouTube's own "open app" nag button/banner, since this app
     already *is* that experience, just wrapped natively.
+
+  See `docs/bugs-caught/` for the current active-bug list before
+  touching any of the above — several of these behaviors have already
+  hit (and mostly fixed) the same class of bug: a native write that's
+  only safe once per state transition being re-run on every repeated
+  WebView JS report.
 - `MediaPlaybackService.kt` — a foreground service hosting a real
   `MediaSessionCompat` and `MediaStyle` notification, so play/pause/
   seek/±10s reach the video from *outside* the app entirely: the lock

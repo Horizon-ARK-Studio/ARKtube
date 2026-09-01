@@ -178,13 +178,34 @@ class FullscreenVideoController(
         view.scaleY = result.scale
     }
 
+    /**
+     * IMPORTANT: only writes `requestedOrientation` when the *category*
+     * (landscape vs. portrait) actually changes -- see BUG-0003 in
+     * docs/bugs-caught/. VIDEO_SIZE_REPORT_JS's own dedupe only
+     * suppresses a re-report when the reported pixel size is
+     * byte-identical to the last one; an ABR resolution step (e.g.
+     * 640x360 -> 1920x1080 shortly after entering fullscreen, both
+     * still landscape) is a legitimate size change that JS correctly
+     * re-reports, which used to reach this function and re-issue the
+     * *same* SENSOR_LANDSCAPE/SENSOR_PORTRAIT value a second time
+     * within ~300-1000ms of the first. Same "operation only safe once
+     * per state transition, re-run on every repeated report" shape as
+     * SurfaceViewZOrderNeutralizer, MediaPlaybackService.requestAudioFocus(),
+     * and StatusBarThemeApplier.apply() -- this was the one place in
+     * the app that pattern had been fixed everywhere else but here.
+     */
     private fun applyOrientationLock(videoWidth: Int, videoHeight: Int) {
         if (!isShowing || videoWidth <= 0 || videoHeight <= 0) return
-        activity.requestedOrientation = if (videoWidth >= videoHeight) {
+        val targetOrientation = if (videoWidth >= videoHeight) {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
             ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
         }
+        if (activity.requestedOrientation == targetOrientation) {
+            ArkLogger.d(COMPONENT, "applyOrientationLock: no-op, orientation category unchanged")
+            return
+        }
+        activity.requestedOrientation = targetOrientation
     }
 
     private fun enterImmersiveFullscreen() {
