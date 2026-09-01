@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "defaultMode": "chrome",
   "port": 0,
-  "documentRoot": "/resources/",
+  "documentRoot": null,
   "url": "https://www.youtube.com/tv#/",
   "enableServer": true,
   "enableNativeAPI": true,
@@ -60,9 +60,16 @@
       "width": 1280,
       "height": 720,
       "args": "--user-agent=\"Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;\" --start-fullscreen",
+      "injectScript": "/resources/js/app-init.js",
       "nativeBlockList": [
-        "filesystem.*",
-        "os.*"
+        "filesystem.*"
+      ],
+      "nativeAllowList": [
+        "app.exit",
+        "app.killProcess",
+        "os.setTray",
+        "os.showMessageBox",
+        "events.broadcast"
       ]
     }
   },

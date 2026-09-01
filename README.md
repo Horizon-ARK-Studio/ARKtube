@@ -292,7 +292,43 @@ If the desktop needs something YouTube doesn't provide, add the smallest layer n
 
 ---
 
-## License
+## Architecture: How the App Initializes
+
+### Key Files
+
+* **`neutralino.config.json`** — Application configuration (window mode vs. chrome mode)
+* **`resources/js/app-init.js`** — Injected into YouTube's page, handles window control and tray menu
+* **`resources/index.html`** — Template-only, not served in production (documentRoot is null)
+* **`resources/js/main.js`** — Dev-only, for testing with `resources/index.html`
+
+### Initialization Flow
+
+1. Neutralino starts with `url: "https://www.youtube.com/tv#/"` (external YouTube, not local resources)
+2. Neutralino injects `resources/js/app-init.js` into the YouTube page
+3. `app-init.js` initializes Neutralino API with error handling
+4. Event listeners are registered for window close and tray menu clicks
+5. Keyboard shortcuts (F11 for fullscreen, Escape for exit) are wired up
+
+### Why `documentRoot` is Null
+
+The app loads YouTube directly as an external URL. The `documentRoot: "/resources/"` would only be used if `url` pointed to a local page (like `/resources/#index`). Since we're using an external URL, we set `documentRoot` to `null` to avoid confusion.
+
+### Production vs. Development
+
+* **Production**: Uses YouTube TV interface with `app-init.js` injected for native controls
+* **Development**: Can temporarily change `url` to `"/resources/#index"` to test with local `index.html` and `main.js`
+
+### Chrome Mode vs. Window Mode
+
+Both modes now include `app-init.js` injection and support for:
+* Tray menu (VERSION, QUIT)
+* Window close handling
+* Fullscreen toggle (F11)
+
+Chrome mode additionally:
+* Launches with `--start-fullscreen` and PS4 user-agent
+* Blocks filesystem access for security
+---
 
 This project contains original code written for the desktop shell and application layer.
 

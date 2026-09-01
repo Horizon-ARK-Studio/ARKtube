@@ -11,10 +11,20 @@
     own script may run before or after it.
 */
 (function () {
+    // Guard against multiple initializations (YouTube or other scripts may run this)
+    if (window.__neutralinoAppInitialized) {
+        return;
+    }
+    window.__neutralinoAppInitialized = true;
+
     function safeExit() {
         // Gracefully shut the native process down instead of relying on
         // exitProcessOnClose to hard-kill it (which skipped this handler entirely).
-        Neutralino.app.exit();
+        try {
+            Neutralino.app.exit();
+        } catch (err) {
+            console.error("Error calling Neutralino.app.exit():", err);
+        }
     }
 
     function onWindowClose() {
@@ -26,10 +36,14 @@
     function onTrayMenuItemClicked(event) {
         switch (event.detail.id) {
             case "VERSION":
-                Neutralino.os.showMessageBox(
-                    "Version information",
-                    `Neutralinojs server: v${NL_VERSION} | Neutralinojs client: v${NL_CVERSION}`
-                );
+                try {
+                    Neutralino.os.showMessageBox(
+                        "Version information",
+                        `Neutralinojs server: v${NL_VERSION} | Neutralinojs client: v${NL_CVERSION}`
+                    );
+                } catch (err) {
+                    console.error("Error showing message box:", err);
+                }
                 break;
             case "QUIT":
                 safeExit();
@@ -38,11 +52,15 @@
     }
 
     async function toggleFullScreen() {
-        const isFull = await Neutralino.window.isFullScreen();
-        if (isFull) {
-            await Neutralino.window.exitFullScreen();
-        } else {
-            await Neutralino.window.setFullScreen();
+        try {
+            const isFull = await Neutralino.window.isFullScreen();
+            if (isFull) {
+                await Neutralino.window.exitFullScreen();
+            } else {
+                await Neutralino.window.setFullScreen();
+            }
+        } catch (err) {
+            console.error("Error toggling fullscreen:", err);
         }
     }
 
@@ -55,11 +73,15 @@
             e.preventDefault();
             toggleFullScreen();
         } else if (e.key === "Escape") {
-            Neutralino.window.isFullScreen().then((isFull) => {
-                if (isFull) {
-                    Neutralino.window.exitFullScreen();
-                }
-            });
+            try {
+                Neutralino.window.isFullScreen().then((isFull) => {
+                    if (isFull) {
+                        Neutralino.window.exitFullScreen();
+                    }
+                });
+            } catch (err) {
+                console.error("Error handling Escape key:", err);
+            }
         }
     }
 
@@ -67,24 +89,39 @@
         if (NL_MODE !== "window") {
             return;
         }
-        Neutralino.os.setTray({
-            icon: "/resources/icons/trayIcon.png",
-            menuItems: [
-                { id: "VERSION", text: "Get version" },
-                { id: "SEP", text: "-" },
-                { id: "QUIT", text: "Quit" }
-            ]
-        });
+        try {
+            Neutralino.os.setTray({
+                icon: "/resources/icons/trayIcon.png",
+                menuItems: [
+                    { id: "VERSION", text: "Get version" },
+                    { id: "SEP", text: "-" },
+                    { id: "QUIT", text: "Quit" }
+                ]
+            });
+        } catch (err) {
+            console.error("Error setting tray:", err);
+        }
     }
 
-    Neutralino.init();
+    // Initialize Neutralino with error handling
+    try {
+        Neutralino.init();
+    } catch (err) {
+        console.error("Error initializing Neutralino:", err);
+        return;
+    }
 
     // exitProcessOnClose is now false (see neutralino.config.json), so this listener
     // is what actually terminates the app on the native close ("X") button -
     // previously it was registered on a page that never loaded, so the close button
     // fell back to the native default with no chance to run cleanup logic.
-    Neutralino.events.on("windowClose", onWindowClose);
-    Neutralino.events.on("trayMenuItemClicked", onTrayMenuItemClicked);
+    try {
+        Neutralino.events.on("windowClose", onWindowClose);
+        Neutralino.events.on("trayMenuItemClicked", onTrayMenuItemClicked);
+    } catch (err) {
+        console.error("Error registering Neutralino events:", err);
+    }
+
     window.addEventListener("keydown", onKeyDown, true);
 
     // TODO: https://github.com/neutralinojs/neutralinojs/issues/615
