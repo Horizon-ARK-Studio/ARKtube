@@ -1,10 +1,10 @@
 # ARKtube — Android edition (Stage 0)
 
 Stage 0 scaffold for an Android build of ARKtube. Same philosophy as
-the desktop app (see `../docs/PROBLEM-STATEMENT.md`): **don't redesign
-YouTube, change the shell around it.** This is a normal Android
-Studio / Gradle project — open it in Android Studio, or build it from
-the command line once you have a JDK:
+the project as a whole (see the [repo root README](../README.md)):
+**don't redesign YouTube, change the shell around it.** This is a
+normal Android Studio / Gradle project — open it in Android Studio,
+or build it from the command line once you have a JDK:
 
 ```
 ./gradlew assembleDebug
@@ -42,6 +42,22 @@ the command line once you have a JDK:
     theme).
   - Hides YouTube's own "open app" nag button/banner, since this app
     already *is* that experience, just wrapped natively.
+- `MediaPlaybackService.kt` — a foreground service hosting a real
+  `MediaSessionCompat` and `MediaStyle` notification, so play/pause/
+  seek/±10s reach the video from *outside* the app entirely: the lock
+  screen, the notification shade, a wired headset's inline remote, a
+  Bluetooth earbud/car-stereo's AVRCP buttons, a paired watch —
+  anything the OS considers a device that can control the active
+  media session. `MEDIA_SESSION_JS` (in `MainActivity.kt`) watches the
+  page's own `<video>` element and reports its play/pause/seek/title/
+  artwork back over a JS bridge, so the session stays truthful even
+  when the user hits YouTube's own on-page controls rather than a
+  native one. Only promoted into the foreground (which is what posts
+  the notification) the first time real playback is reported, not
+  eagerly on launch — there's never a "nothing's playing" notification
+  sitting in the shade. Handles audio focus (pauses on a call/other
+  player taking over) and headphone-unplug, same as any other media
+  app.
 - `ArkTubeApplication.kt` — enables Material You dynamic color on
   Android 12+; only affects the splash screen and system bars, since
   the WebView content is YouTube's own theming.
@@ -64,8 +80,8 @@ succeeds and gives you an unsigned APK you can sign yourself later.
 
 ## Stage 0 scope
 
-Deliberately narrow, matching the desktop README's "the project will
-stay deliberately small until the underlying approach is proven":
+Deliberately narrow — the project stays small until the underlying
+approach is proven:
 
 - [x] Loads YouTube (mobile web UI, via `m.youtube.com`)
 - [x] JS / DOM storage / cookies enabled (so login persists)
@@ -75,21 +91,19 @@ stay deliberately small until the underlying approach is proven":
       hidden), cropped to fill rather than letterboxed, oriented to
       match the video's own shape regardless of the rotation lock,
       and keeps the screen awake for as long as it's on screen
+- [x] Media-session/notification playback controls (play/pause/seek
+      from the lock screen, notification shade, wired headset, or a
+      Bluetooth device's own transport buttons)
 - [ ] Playback verification on a real device
 - [ ] Authentication / session-persistence verification
 - [ ] Picture-in-picture
-- [ ] Media-session / notification playback controls
 - [ ] Any persistent native chrome (nav shell, sidebar)
 - [ ] Download interception, ad-blocking, or other content changes
 
-Everything unchecked is explicitly out of scope for this stage — see
-the desktop app's roadmap (`../README.md`) for how later stages are
-expected to build on this.
+Everything unchecked is explicitly out of scope for this stage.
 
 ## Why `m.youtube.com` and not `youtube.com`
 
 A phone-sized WebView showing the desktop site produces a squeezed,
 zoomed-out desktop layout rather than a usable mobile one. Loading
-`m.youtube.com` directly gets YouTube's own mobile web UI instead —
-same approach the desktop app takes with `youtube.com` on desktop
-(see `../docs/PROBLEM-STATEMENT.md`).
+`m.youtube.com` directly gets YouTube's own mobile web UI instead.
