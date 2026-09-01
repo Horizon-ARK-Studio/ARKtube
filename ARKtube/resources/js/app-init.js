@@ -51,16 +51,66 @@
         }
     }
 
+    // Neutralino.window.* only works when running in window mode -- per
+    // Neutralino's own docs, "This namespace's methods will work only for
+    // the window mode." In chrome mode (this app's defaultMode) there's no
+    // Neutralino-owned native window handle for it to control, and the
+    // calls silently no-op instead of erroring (see
+    // neutralinojs/neutralinojs#751). That's why F11/Escape used to appear
+    // to do nothing, and why the *real* window being maximized/restored --
+    // the actual OS-native Chrome window -- was invisible to this script
+    // entirely. In chrome mode we're just a normal page in a real browser
+    // tab, so the standard DOM Fullscreen API is the correct tool instead.
+    function isNativeWindowMode() {
+        return typeof NL_MODE !== "undefined" && NL_MODE === "window";
+    }
+
     async function toggleFullScreen() {
         try {
-            const isFull = await Neutralino.window.isFullScreen();
-            if (isFull) {
-                await Neutralino.window.exitFullScreen();
+            if (isNativeWindowMode()) {
+                const isFull = await Neutralino.window.isFullScreen();
+                if (isFull) {
+                    await Neutralino.window.exitFullScreen();
+                } else {
+                    await Neutralino.window.setFullScreen();
+                }
+            } else if (document.fullscreenElement) {
+                await document.exitFullscreen();
             } else {
-                await Neutralino.window.setFullScreen();
+                await document.documentElement.requestFullscreen();
             }
         } catch (err) {
             console.error("Error toggling fullscreen:", err);
+        }
+    }
+
+    async function exitFullScreenIfActive() {
+        try {
+            if (isNativeWindowMode()) {
+                const isFull = await Neutralino.window.isFullScreen();
+                if (isFull) {
+                    await Neutralino.window.exitFullScreen();
+                }
+            } else if (document.fullscreenElement) {
+                await document.exitFullscreen();
+            }
+        } catch (err) {
+            console.error("Error handling Escape key:", err);
+        }
+    }
+
+    function goHome() {
+        // /tv is a hash-routed SPA (see the url in neutralino.config.json).
+        // Changing the hash lets its own router handle navigation in place,
+        // instead of a full document reload -- which would drop playback
+        // and force this injected script to run all over again from a
+        // fresh, un-initialized document.
+        try {
+            if (location.hash !== "#/") {
+                location.hash = "/";
+            }
+        } catch (err) {
+            console.error("Error navigating home:", err);
         }
     }
 
@@ -68,21 +118,42 @@
         // youtube.com/tv is built for a 10-foot, full-screen, remote-driven
         // experience (this is the same UI Cobalt renders on certified TVs).
         // F11 mirrors normal browser/TV-app behavior; Escape only backs out
-        // of fullscreen (it never quits the app outright).
+        // of fullscreen (it never quits the app outright); Home is desktop-
+        // app augmentation on top of that, since a real remote's Home
+        // button has no keyboard equivalent otherwise.
         if (e.key === "F11") {
             e.preventDefault();
             toggleFullScreen();
         } else if (e.key === "Escape") {
-            try {
-                Neutralino.window.isFullScreen().then((isFull) => {
-                    if (isFull) {
-                        Neutralino.window.exitFullScreen();
-                    }
-                });
-            } catch (err) {
-                console.error("Error handling Escape key:", err);
-            }
+            exitFullScreenIfActive();
+        } else if (e.key === "Home") {
+            e.preventDefault();
+            goHome();
         }
+    }
+
+    let resizeSettleTimer = null;
+
+    function onWindowResize() {
+        // The TV/Leanback UI computes player and row-grid dimensions on
+        // load and again on 'resize', but a real native maximize/restore
+        // can fire an intermediate 'resize' mid-animation, before the
+        // window has actually settled at its final size -- leaving the
+        // page's own layout math stale at whatever size it caught partway
+        // through. Debounce and re-fire 'resize' once movement has
+        // actually stopped, so the page gets one more accurate measurement
+        // to work with after the window is done changing size.
+        if (resizeSettleTimer) {
+            clearTimeout(resizeSettleTimer);
+        }
+        resizeSettleTimer = setTimeout(() => {
+            resizeSettleTimer = null;
+            try {
+                window.dispatchEvent(new Event("resize"));
+            } catch (err) {
+                console.error("Error re-dispatching settled resize:", err);
+            }
+        }, 250);
     }
 
     function setTray() {
@@ -123,6 +194,7 @@
     }
 
     window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("resize", onWindowResize);
 
     // TODO: https://github.com/neutralinojs/neutralinojs/issues/615
     if (NL_OS !== "Darwin") {
