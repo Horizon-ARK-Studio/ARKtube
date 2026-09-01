@@ -85,7 +85,10 @@ class MainActivity : AppCompatActivity() {
         // Must be called before super.onCreate().
         installSplashScreen()
         super.onCreate(savedInstanceState)
-        ArkLogger.init(applicationContext)
+        // ArkLogger.init() is called once from ArkTubeApplication.onCreate
+        // instead of here -- it needs to be live before
+        // NotificationSyncWorker can possibly run, which can happen
+        // via WorkManager without MainActivity ever starting.
 
         ArkLogger.track(COMPONENT, "onCreate") {
             configureWindowForCutout()

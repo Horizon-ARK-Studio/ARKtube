@@ -36,11 +36,13 @@ concern a package that matches what it's actually responsible for:
 ```
 com.arktube.app
 ├── MainActivity.kt          -- Activity lifecycle + wiring only
-├── MediaPlaybackService.kt
+├── MediaPlaybackService.kt  -- session/audio-focus lifecycle only
+├── ArkTubeApplication.kt    -- process-wide startup (logger init, etc.)
 ├── fullscreen/               -- everything about fullscreen video
 ├── webview/                  -- WebView construction + JS bridges
 │   └── bridge/
-├── media/                     -- media-session coordination
+├── media/                     -- media-session coordination + its notification
+├── notifications/              -- YouTube-inbox polling + its notification
 ├── theme/                     -- status bar theming
 ├── layout/                    -- rotation/reflow
 ├── prefs/                     -- persisted preferences
@@ -48,10 +50,18 @@ com.arktube.app
 ```
 
 `MainActivity` after the split does one job: own the Activity
-lifecycle and wire its collaborators together. If you're adding a
-feature and reaching for `MainActivity.kt`, stop and ask which
-existing package it belongs to first -- or whether it's a new package.
-It very rarely needs to be MainActivity itself.
+lifecycle and wire its collaborators together. `MediaPlaybackService`
+and `NotificationSyncWorker` (a `CoroutineWorker`, not an Activity,
+but the same instinct applies) are held to the same standard: each is
+a thin entry point Android itself instantiates, wired to
+collaborators that actually do the work -- `MediaNotificationFactory`
+builds the playback notification so the Service doesn't have to,
+`InboxScraper`/`VideoNotificationFactory`/`NotificationSyncStore` each
+own one piece of the notification-sync job so the Worker doesn't have
+to. If you're adding a feature and reaching for one of these
+entry-point files, stop and ask which existing package it belongs to
+first -- or whether it's a new package. It very rarely needs to live
+in the entry point itself.
 
 ---
 
@@ -68,12 +78,17 @@ already had:
   A Kotlin `object` is the honest way to say "exactly one, globally
   reachable."
 - **Factory** (`webview.ArkTubeWebViewFactory`,
-  `fullscreen.StretchToggleButtonFactory`) -- assembling a fully
-  configured `WebView` (settings + three bridges + script injection)
-  or a styled `Button` is multi-step and easy to get subtly wrong if
-  it's inlined at every call site. A factory makes "the one correct
-  way to build this thing" a single function, and callers never touch
-  the raw constructor.
+  `fullscreen.StretchToggleButtonFactory`,
+  `media.MediaNotificationFactory`,
+  `notifications.VideoNotificationFactory`) -- assembling a fully
+  configured `WebView` (settings + three bridges + script injection),
+  a styled `Button`, or a `NotificationCompat.Builder` with the right
+  channel/actions/style is multi-step and easy to get subtly wrong if
+  it's inlined at every call site -- or, worse, duplicated at two call
+  sites that quietly drift apart (this app has two independent
+  notification surfaces, one per Factory above, each with its own
+  channel). A factory makes "the one correct way to build this thing"
+  a single function, and callers never touch the raw constructor.
 - **Facade** (`fullscreen.FullscreenVideoController`) -- fullscreen
   video is a genuinely tangled subsystem (customView hosting,
   SurfaceView z-order, zoom-crop, immersive bars, orientation lock).

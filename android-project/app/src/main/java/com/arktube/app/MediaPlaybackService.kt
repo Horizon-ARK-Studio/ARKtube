@@ -1,9 +1,5 @@
 package com.arktube.app
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -15,15 +11,16 @@ import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
-import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
-import androidx.media.app.NotificationCompat.MediaStyle
 import androidx.media.session.MediaButtonReceiver
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.app.Service
+import com.arktube.app.logging.ArkLogger
+import com.arktube.app.media.MediaNotificationFactory
 
 /**
  * Hosts the app's one [MediaSessionCompat] and the media-style
@@ -36,6 +33,13 @@ import android.support.v4.media.session.PlaybackStateCompat
  * control the active media session", which is exactly what
  * MediaSessionCompat exists to broadcast to. None of those surfaces
  * talk to the WebView directly; they all go through this session.
+ *
+ * The notification itself -- what it looks like, its actions, its
+ * channel -- is built by [MediaNotificationFactory] (GoF Factory),
+ * not here; this class owns the session/audio-focus lifecycle only.
+ * See docs/Foundational/CODE-STYLE.md Section 1 for why those are
+ * kept as two separate reasons to change even though they're closely
+ * related.
  *
  * This deliberately does not attempt real background/PiP-style
  * playback survival, a media queue/playlist, or Android Auto
@@ -65,6 +69,15 @@ import android.support.v4.media.session.PlaybackStateCompat
  *    the notification/lock screen/etc. -- stays truthful about what's
  *    actually happening on the page, not just a mirror of the last
  *    command sent to it.
+ *
+ * Every method here that crosses a platform lifecycle boundary --
+ * onCreate/onStartCommand/onDestroy, and the two public update
+ * methods JS-reported state flows through -- is wrapped with
+ * [ArkLogger] try/catch/finally logging per
+ * docs/Foundational/CODE-STYLE.md Section 3: none of these have a
+ * caller that could meaningfully react to a rethrown exception, so a
+ * failure here needs to be observable in the failure log rather than
+ * silently dropped.
  */
 class MediaPlaybackService : Service() {
 
@@ -114,77 +127,89 @@ class MediaPlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        createNotificationChannel()
+        ArkLogger.track(COMPONENT, "onCreate") {
+            audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            MediaNotificationFactory.ensureChannel(this)
 
-        mediaSession = MediaSessionCompat(this, "ArkTubeMediaSession").apply {
-            setFlags(
-                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
-                    MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
-            )
-            setCallback(object : MediaSessionCompat.Callback() {
-                override fun onPlay() {
-                    commandListener?.onPlayCommand()
-                }
+            mediaSession = MediaSessionCompat(this, "ArkTubeMediaSession").apply {
+                setFlags(
+                    MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
+                        MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
+                )
+                setCallback(object : MediaSessionCompat.Callback() {
+                    override fun onPlay() {
+                        commandListener?.onPlayCommand()
+                    }
 
-                override fun onPause() {
-                    commandListener?.onPauseCommand()
-                }
+                    override fun onPause() {
+                        commandListener?.onPauseCommand()
+                    }
 
-                override fun onStop() {
-                    // No real native "stop" for a page video beyond
-                    // pausing it -- there's nothing to release/tear
-                    // down the way a local media player would.
-                    commandListener?.onPauseCommand()
-                }
+                    override fun onStop() {
+                        // No real native "stop" for a page video beyond
+                        // pausing it -- there's nothing to release/tear
+                        // down the way a local media player would.
+                        commandListener?.onPauseCommand()
+                    }
 
-                override fun onSeekTo(pos: Long) {
-                    commandListener?.onSeekToCommand(pos)
-                }
+                    override fun onSeekTo(pos: Long) {
+                        commandListener?.onSeekToCommand(pos)
+                    }
 
-                override fun onFastForward() {
-                    commandListener?.onFastForwardCommand()
-                }
+                    override fun onFastForward() {
+                        commandListener?.onFastForwardCommand()
+                    }
 
-                override fun onRewind() {
-                    commandListener?.onRewindCommand()
-                }
-            })
-            setPlaybackState(idlePlaybackState())
-            isActive = true
+                    override fun onRewind() {
+                        commandListener?.onRewindCommand()
+                    }
+                })
+                setPlaybackState(idlePlaybackState())
+                isActive = true
+            }
+
+            registerReceiver(becomingNoisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
         }
-
-        registerReceiver(becomingNoisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Whenever this service is (re)started -- MainActivity's own
-        // startForegroundService() call the first time real playback
-        // begins, or the system relaunching it to deliver a tapped
-        // notification action/media-button PendingIntent -- Android
-        // requires startForeground() to be called shortly after
-        // onStartCommand() returns. Post a notification immediately;
-        // updatePlaybackState()/updateMetadata() replace it with
-        // fresher content moments later once MainActivity/JS report
-        // the actual state.
-        startForegroundWithNotification()
-        intent?.let { MediaButtonReceiver.handleIntent(mediaSession, it) }
-        return START_NOT_STICKY
-    }
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int =
+        ArkLogger.track(COMPONENT, "onStartCommand") {
+            // Whenever this service is (re)started -- MainActivity's own
+            // startForegroundService() call the first time real playback
+            // begins, or the system relaunching it to deliver a tapped
+            // notification action/media-button PendingIntent -- Android
+            // requires startForeground() to be called shortly after
+            // onStartCommand() returns. Post a notification immediately;
+            // updatePlaybackState()/updateMetadata() replace it with
+            // fresher content moments later once MainActivity/JS report
+            // the actual state.
+            startForegroundWithNotification()
+            intent?.let { MediaButtonReceiver.handleIntent(mediaSession, it) }
+            START_NOT_STICKY
+        }
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onDestroy() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(audioFocusListener)
+        ArkLogger.track(COMPONENT, "onDestroy") {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.abandonAudioFocus(audioFocusListener)
+            }
+            try {
+                unregisterReceiver(becomingNoisyReceiver)
+            } catch (t: Throwable) {
+                // Not fatal -- can legitimately already be unregistered
+                // if onDestroy somehow runs twice -- but worth a
+                // warning if it happens for any other reason.
+                ArkLogger.w(COMPONENT, "unregisterReceiver failed", t)
+            }
+            mediaSession.isActive = false
+            mediaSession.release()
+            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         }
-        runCatching { unregisterReceiver(becomingNoisyReceiver) }
-        mediaSession.isActive = false
-        mediaSession.release()
-        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
 
@@ -217,36 +242,38 @@ class MediaPlaybackService : Service() {
      * re-run on every repeated report.
      */
     fun updatePlaybackState(playing: Boolean, positionMs: Long, playbackSpeed: Float) {
-        val wasPlaying = isPlaying
-        isPlaying = playing
-        val actions = PlaybackStateCompat.ACTION_PLAY or
-            PlaybackStateCompat.ACTION_PAUSE or
-            PlaybackStateCompat.ACTION_PLAY_PAUSE or
-            PlaybackStateCompat.ACTION_SEEK_TO or
-            PlaybackStateCompat.ACTION_FAST_FORWARD or
-            PlaybackStateCompat.ACTION_REWIND or
-            PlaybackStateCompat.ACTION_STOP
-        val state = if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
-        mediaSession.setPlaybackState(
-            PlaybackStateCompat.Builder()
-                .setActions(actions)
-                .setState(state, positionMs, if (playbackSpeed > 0f) playbackSpeed else 1f)
-                .build()
-        )
-        if (playing) {
-            if (!wasPlaying) {
-                requestAudioFocus()
+        ArkLogger.track(COMPONENT, "updatePlaybackState(playing=$playing)") {
+            val wasPlaying = isPlaying
+            isPlaying = playing
+            val actions = PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                PlaybackStateCompat.ACTION_SEEK_TO or
+                PlaybackStateCompat.ACTION_FAST_FORWARD or
+                PlaybackStateCompat.ACTION_REWIND or
+                PlaybackStateCompat.ACTION_STOP
+            val state = if (playing) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
+            mediaSession.setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(actions)
+                    .setState(state, positionMs, if (playbackSpeed > 0f) playbackSpeed else 1f)
+                    .build()
+            )
+            if (playing) {
+                if (!wasPlaying) {
+                    requestAudioFocus()
+                }
+                startForegroundWithNotification()
+            } else {
+                updateNotification()
+                // Demotes out of the foreground state but leaves the
+                // notification up (now showing a "paused" transport
+                // control) so the user can dismiss it manually, matching
+                // how music apps behave once actually paused -- and lets
+                // Android reclaim the process more readily than it would
+                // while a foreground service is still active.
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
             }
-            startForegroundWithNotification()
-        } else {
-            updateNotification()
-            // Demotes out of the foreground state but leaves the
-            // notification up (now showing a "paused" transport
-            // control) so the user can dismiss it manually, matching
-            // how music apps behave once actually paused -- and lets
-            // Android reclaim the process more readily than it would
-            // while a foreground service is still active.
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
         }
     }
 
@@ -254,18 +281,20 @@ class MediaPlaybackService : Service() {
      * Updates title/duration/artwork -- called from MainActivity once
      * MEDIA_SESSION_JS reports the page's title (and MainActivity has
      * finished decoding `artwork`, if any og:image URL was found; see
-     * MainActivity.loadArtworkAndApplyMetadata()).
+     * MediaSessionCoordinator.loadArtwork()).
      */
     fun updateMetadata(title: String?, durationMs: Long, artwork: Bitmap?) {
-        val builder = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title ?: getString(R.string.app_name))
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "YouTube")
-            .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
-        if (artwork != null) {
-            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork)
+        ArkLogger.track(COMPONENT, "updateMetadata") {
+            val builder = MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title ?: getString(R.string.app_name))
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, "YouTube")
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs)
+            if (artwork != null) {
+                builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork)
+            }
+            mediaSession.setMetadata(builder.build())
+            updateNotification()
         }
-        mediaSession.setMetadata(builder.build())
-        updateNotification()
     }
 
     private fun idlePlaybackState(): PlaybackStateCompat = PlaybackStateCompat.Builder()
@@ -274,114 +303,64 @@ class MediaPlaybackService : Service() {
         .build()
 
     private fun requestAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val request = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setOnAudioFocusChangeListener(audioFocusListener)
-                .build()
-                .also { audioFocusRequest = it }
-            audioManager.requestAudioFocus(request)
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                audioFocusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN
-            )
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val request = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setOnAudioFocusChangeListener(audioFocusListener)
+                    .build()
+                    .also { audioFocusRequest = it }
+                audioManager.requestAudioFocus(request)
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.requestAudioFocus(
+                    audioFocusListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN
+                )
+            }
+        } catch (t: Throwable) {
+            // Losing audio focus tracking isn't fatal to playback
+            // itself (Chromium still owns the actual audio output),
+            // just to how gracefully this app defers to other apps'
+            // audio -- worth a warning, not a crash.
+            ArkLogger.w(COMPONENT, "requestAudioFocus failed", t)
         }
-    }
-
-    private fun buildNotification(): android.app.Notification {
-        val contentIntent = PendingIntent.getActivity(
-            this, 0,
-            Intent(this, MainActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val playPauseAction = if (isPlaying) {
-            NotificationCompat.Action(
-                android.R.drawable.ic_media_pause, "Pause",
-                MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PAUSE)
-            )
-        } else {
-            NotificationCompat.Action(
-                android.R.drawable.ic_media_play, "Play",
-                MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PLAY)
-            )
-        }
-        val rewindAction = NotificationCompat.Action(
-            android.R.drawable.ic_media_rew, "Rewind 10s",
-            MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_REWIND)
-        )
-        val forwardAction = NotificationCompat.Action(
-            android.R.drawable.ic_media_ff, "Forward 10s",
-            MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_FAST_FORWARD)
-        )
-
-        val metadata = mediaSession.controller?.metadata
-        val title = metadata?.getString(MediaMetadataCompat.METADATA_KEY_TITLE) ?: getString(R.string.app_name)
-        val artwork = metadata?.getBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART)
-
-        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_monochrome)
-            .setContentTitle(title)
-            .setContentText("YouTube")
-            .setLargeIcon(artwork)
-            .setContentIntent(contentIntent)
-            .setOnlyAlertOnce(true)
-            .setOngoing(isPlaying)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .addAction(rewindAction)
-            .addAction(playPauseAction)
-            .addAction(forwardAction)
-            .setStyle(
-                MediaStyle()
-                    .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0, 1, 2)
-            )
-            .setDeleteIntent(
-                MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_STOP)
-            )
-            .build()
     }
 
     private fun updateNotification() {
-        if (!::mediaSession.isInitialized) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) !=
-                android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
-            // No permission to actually show it -- the session itself
-            // (and therefore lock-screen/Bluetooth/wired transport
-            // control) still works without a visible notification.
-            return
+        try {
+            if (!::mediaSession.isInitialized) return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) !=
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                // No permission to actually show it -- the session itself
+                // (and therefore lock-screen/Bluetooth/wired transport
+                // control) still works without a visible notification.
+                return
+            }
+            NotificationManagerCompat.from(this)
+                .notify(MediaNotificationFactory.NOTIFICATION_ID, MediaNotificationFactory.build(this, mediaSession, isPlaying))
+        } catch (t: Throwable) {
+            ArkLogger.e(COMPONENT, "updateNotification failed", t)
         }
-        NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun startForegroundWithNotification() {
-        val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-    }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID, "Playback controls", NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Playback controls for the video currently open in ARKtube"
-                setShowBadge(false)
+        try {
+            val notification = MediaNotificationFactory.build(this, mediaSession, isPlaying)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(MediaNotificationFactory.NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+            } else {
+                startForeground(MediaNotificationFactory.NOTIFICATION_ID, notification)
             }
-            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
-                .createNotificationChannel(channel)
+        } catch (t: Throwable) {
+            // A failed startForeground() here is serious -- Android
+            // requires it soon after onStartCommand() -- so this is
+            // an error, not a warning.
+            ArkLogger.e(COMPONENT, "startForegroundWithNotification failed", t)
         }
     }
 
-    companion object {
-        private const val NOTIFICATION_CHANNEL_ID = "arktube_playback"
-        private const val NOTIFICATION_ID = 1001
+    private companion object {
+        const val COMPONENT = "MediaPlaybackService"
     }
 }
