@@ -1,1 +1,3 @@
-*.patch
+*.patchdebug.keystore
+debug.keystore.b64
+*.keystore
