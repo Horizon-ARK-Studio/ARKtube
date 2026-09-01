@@ -67,6 +67,7 @@
       "nativeAllowList": [
         "app.exit",
         "app.killProcess",
+        "debug.log",
         "os.setTray",
         "os.showMessageBox",
         "events.broadcast"
