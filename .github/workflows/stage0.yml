@@ -1,7 +1,16 @@
 name: Build AppImage
 
-# Packages the ARKtube Neutralino shell into a Linux AppImage using the
-# prebuilt neutralino-linux_x64 binary and resources checked into the repo.
+# Packages the ARKtube Neutralino shell into a Linux AppImage.
+#
+# This delegates to `neu build --embed-resources` and the
+# packaging/linux/ scripts (AppRun, build-appimage.sh) instead of hand
+# -assembling the AppDir here, so CI and a local build can never drift
+# apart again. See docs/BUGS-CAUGHT.md for why both of those matter:
+#   - `neu build --embed-resources` bakes resources.neu into the binary,
+#     so there's no separate resources file to lose track of.
+#   - packaging/linux/AppRun launches with a writable --path, so
+#     Neutralino's ./.tmp directory isn't created inside the read-only
+#     AppImage mount.
 
 on:
   push:
@@ -34,48 +43,19 @@ jobs:
             libwebkit2gtk-4.1-0 \
             libfuse2
 
-      - name: Make prebuilt binary executable
-        run: chmod +x bin/neutralino-linux_x64
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      - name: Assemble AppDir
-        run: |
-          set -e
-          APPDIR=AppDir
-          mkdir -p "$APPDIR/usr/bin"
+      - name: Install Neutralino CLI
+        run: npm install -g @neutralinojs/neu
 
-          cp bin/neutralino-linux_x64 "$APPDIR/usr/bin/ARKtube"
-          chmod +x "$APPDIR/usr/bin/ARKtube"
-          cp -r resources "$APPDIR/usr/bin/resources"
-          cp neutralino.config.json "$APPDIR/usr/bin/neutralino.config.json"
-
-          cp resources/icons/appIcon.png "$APPDIR/ARKtube.png"
-
-          {
-            echo "[Desktop Entry]"
-            echo "Type=Application"
-            echo "Name=ARKtube"
-            echo "Exec=ARKtube"
-            echo "Icon=ARKtube"
-            echo "Categories=Network;AudioVideo;"
-            echo "Terminal=false"
-          } > "$APPDIR/ARKtube.desktop"
-
-          {
-            echo '#!/bin/sh'
-            echo 'HERE="$(dirname "$(readlink -f "$0")")"'
-            echo 'cd "$HERE/usr/bin"'
-            echo 'exec ./ARKtube "$@"'
-          } > "$APPDIR/AppRun"
-          chmod +x "$APPDIR/AppRun"
-
-      - name: Download appimagetool
-        run: |
-          curl -L -o appimagetool \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool
+      - name: Make prebuilt binaries executable
+        run: chmod +x bin/neutralino-linux_x64 bin/neutralino-linux_arm64 bin/neutralino-linux_armhf
 
       - name: Build AppImage
-        run: ./appimagetool --appimage-extract-and-run AppDir ARKtube-x86_64.AppImage
+        run: ./packaging/linux/build-appimage.sh
 
       - name: Upload AppImage artifact
         uses: actions/upload-artifact@v4
