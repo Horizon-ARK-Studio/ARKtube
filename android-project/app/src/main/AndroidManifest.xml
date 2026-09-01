@@ -9,7 +9,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!-- Lets MediaPlaybackService run as a foreground service while
-         video is actually playing -- required for the OS to treat its
+         video is actually playing - required for the OS to treat its
          MediaSessionCompat/notification as a genuine active media
          session that the lock screen, Bluetooth AVRCP devices, and
          wired headset buttons can address. FOREGROUND_SERVICE_MEDIA_PLAYBACK
@@ -19,7 +19,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Only gates whether the media notification itself can be
-         *shown* on Android 13+ -- MediaSessionCompat, and therefore
+         *shown* on Android 13+ - MediaSessionCompat, and therefore
          lock-screen/Bluetooth/wired transport control, works with or
          without this being granted. Requested at runtime in
          MainActivity.onCreate(). -->
@@ -47,7 +47,7 @@
         </activity>
 
         <!-- Hosts the MediaSessionCompat/notification for OS-level
-             play/pause/seek transport control -- see
+             play/pause/seek transport control - see
              MediaPlaybackService's own class doc. The MEDIA_BUTTON
              intent-filter is what lets MediaButtonReceiver.
              buildMediaButtonPendingIntent() (used for the
