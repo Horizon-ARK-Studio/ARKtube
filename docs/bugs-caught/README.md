@@ -46,7 +46,13 @@ Template:
   Additional information.
 -->
 
-_No active bugs._
+- [BUG-0001](./BUG-0001-fullscreen-decoder-churn.md): Video decoder repeatedly
+  releases/recreates during normal playback ("pauses instantly, again and again") —
+  `Critical`, root cause still open.
+- [BUG-0002](./BUG-0002-zoom-to-fill-baked-in-bars.md): Zoom-to-fill doesn't crop
+  letterbox/pillarbox baked into the encoded video itself — `Medium`.
+- [BUG-0003](./BUG-0003-orientation-lock-unconfirmed.md): Fullscreen orientation lock
+  possibly self-reasserting — `Low`, unconfirmed, needs dedicated repro.
 
 ---
 
