@@ -231,9 +231,13 @@ neu update                       # fetch the pinned 6.8.0 binaries
 ./packaging/windows/build-exe.ps1
 ```
 
-Produces `ARKtube-<version>-windows-x64.zip` containing a single
-self-contained `ARKtube.exe` (resources are embedded into the binary at
-build time, so there's nothing else to ship alongside it).
+Produces `ARKtube-<version>-windows-x64.zip` containing `ARKtube.exe`
+(resources are embedded into the binary at build time, so there's
+nothing else needed to run it) plus `ARKtube.bat` / `Launch-ARKtube.ps1`.
+**Run `ARKtube.bat`, not `ARKtube.exe` directly** - the wrapper points
+Neutralino at a writable per-user data dir and cleans up the detached
+chrome-mode child process on exit (see
+`packaging/windows/Launch-ARKtube.ps1` for why that matters).
 
 ### macOS: building the .dmg
 
@@ -262,6 +266,25 @@ understands — so any game controller, or any remote that a platform
 exposes to the browser as a HID gamepad, drives the same youtube.com/tv
 navigation a keyboard does, with no separate input path to maintain.
 Connect/disconnect events are logged via `debug.log` for troubleshooting.
+
+### Chrome-mode process lifecycle
+
+ARKtube's `defaultMode` is `chrome` (see `neutralino.config.json`), which
+runs the actual YouTube page in a separate Chrome/Chromium/Edge child
+process rather than Neutralino's own webview. That child process is
+launched fully detached from the Neutralino server process, so
+`Neutralino.app.exit()` (what `app-init.js` calls on window close) only
+ever terminates the Neutralino server - never the browser it spawned.
+Left alone, that leaks a browser process (and its profile lock) on any
+exit that isn't a clean quit through the app UI, and the next launch
+silently reattaches to the orphan instead of starting fresh. Every
+launcher this project ships - `packaging/linux/AppRun` (AppImage),
+`packaging/linux/build-deb.sh`'s `/usr/bin/arktube`,
+`packaging/macos/build-dmg.sh`'s `ARKtube.app` wrapper, and
+`packaging/windows/Launch-ARKtube.ps1` - reaps that orphaned process and
+its stale lock files both before and after each run. If you add another
+distribution channel, carry the same cleanup over; running the raw
+Neutralino binary directly (bypassing all of the above) will hit this.
 
 ### Linux: hardware-accelerated playback
 

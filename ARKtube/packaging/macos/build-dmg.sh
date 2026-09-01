@@ -50,6 +50,21 @@ install -m755 "${BIN_SRC}" "${APP_DIR}/Contents/MacOS/ARKtube"
 # as packaging/linux/AppRun - a .app bundle under /Applications is not
 # writable by a normal user, so launch through a thin wrapper instead of
 # calling the binary directly.
+#
+# This wrapper also carries over AppRun's chrome-mode cleanup (see
+# packaging/linux/AppRun and docs/BUGS-CAUGHT.md): Neutralino's chrome
+# mode launches Chrome/Chromium as a fully-detached child process, so it
+# is NOT part of this wrapper's or the Neutralino binary's process
+# group, and app.exit()/app.killProcess() only ever signal the
+# Neutralino server's own PID, never Chrome's. On an unclean exit
+# (Cmd-Q from the Dock, a force-quit, a crash) Chrome and its profile
+# lock (SingletonLock/SingletonSocket/SingletonCookie under
+# .tmp/chromedata) are orphaned, and the next launch hits Chrome's own
+# singleton-instance check and silently hands off to that orphan instead
+# of starting fresh ("Opening in existing browser session."), which also
+# means that window is never wired to app-init.js's close handling.
+# Without this, every .app launch (not just the AppImage) leaks a Chrome
+# process on any exit that isn't a clean quit through the app UI.
 mv "${APP_DIR}/Contents/MacOS/ARKtube" "${APP_DIR}/Contents/MacOS/ARKtube-bin"
 cat > "${APP_DIR}/Contents/MacOS/ARKtube" <<'LAUNCHER'
 #!/usr/bin/env bash
@@ -57,7 +72,29 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARKTUBE_DATA_DIR="${HOME}/Library/Application Support/ARKtube"
 mkdir -p "${ARKTUBE_DATA_DIR}"
-exec "${HERE}/ARKtube-bin" --path="${ARKTUBE_DATA_DIR}"
+
+CHROME_PROFILE_DIR="${ARKTUBE_DATA_DIR}/.tmp/chromedata"
+CHROME_LOCK_PATTERN="--user-data-dir=${CHROME_PROFILE_DIR}"
+
+reap_stale_chrome() {
+    if command -v pgrep >/dev/null 2>&1; then
+        pids="$(pgrep -f -- "${CHROME_LOCK_PATTERN}" 2>/dev/null || true)"
+        if [ -n "${pids}" ]; then
+            echo "ARKtube: cleaning up a leftover browser process from a previous run..." >&2
+            kill -TERM ${pids} 2>/dev/null || true
+            sleep 1
+            kill -KILL ${pids} 2>/dev/null || true
+        fi
+    fi
+    rm -f "${CHROME_PROFILE_DIR}/SingletonLock" \
+          "${CHROME_PROFILE_DIR}/SingletonSocket" \
+          "${CHROME_PROFILE_DIR}/SingletonCookie" 2>/dev/null || true
+}
+
+reap_stale_chrome
+trap reap_stale_chrome EXIT INT TERM
+
+"${HERE}/ARKtube-bin" --path="${ARKTUBE_DATA_DIR}"
 LAUNCHER
 chmod 755 "${APP_DIR}/Contents/MacOS/ARKtube"
 

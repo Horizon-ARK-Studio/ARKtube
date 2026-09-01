@@ -3,8 +3,12 @@
 # Mirrors packaging/linux/build-appimage.sh: builds with
 # `neu build --embed-resources` (see docs/BUGS-CAUGHT.md) so resources
 # are baked straight into ARKtube-win_x64.exe and there's no separate
-# resources.neu to lose track of, then zips the single self-contained
-# .exe up as the downloadable Windows artifact.
+# resources.neu to lose track of, then zips it up together with
+# ARKtube.bat / Launch-ARKtube.ps1 (see packaging/windows/Launch-ARKtube.ps1
+# for why a plain launch of ARKtube.exe isn't enough - it also carries
+# over the chrome-mode orphaned-process cleanup that
+# packaging/linux/AppRun and packaging/macos/build-dmg.sh's launcher do)
+# as the downloadable Windows artifact.
 #
 # Usage:
 #   cd ARKtube/
@@ -41,6 +45,8 @@ if (-not (Test-Path $BinSrc)) {
 Write-Host "==> Assembling release folder"
 Copy-Item $BinSrc (Join-Path $StageDir "ARKtube.exe")
 Copy-Item (Join-Path $RootDir "resources\icons\appIcon.png") (Join-Path $StageDir "appIcon.png")
+Copy-Item (Join-Path $PSScriptRoot "Launch-ARKtube.ps1") (Join-Path $StageDir "Launch-ARKtube.ps1")
+Copy-Item (Join-Path $PSScriptRoot "ARKtube.bat") (Join-Path $StageDir "ARKtube.bat")
 
 Write-Host "==> Zipping"
 if (Test-Path $Output) {

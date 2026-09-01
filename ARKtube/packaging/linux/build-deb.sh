@@ -51,13 +51,53 @@ install -Dm644 "${ROOT_DIR}/resources/icons/appIcon.png" \
 # binary, so NL_PATH can be pointed at a writable per-user data dir the
 # same way packaging/linux/AppRun does for the AppImage build - a .deb
 # install lands under /usr, which is read-only for the running user.
+#
+# It also carries over AppRun's chrome-mode cleanup (see AppRun and
+# docs/BUGS-CAUGHT.md): Neutralino's chrome mode launches Chrome/Chromium
+# as a fully-detached child process (TinyProcessLib calls setpgid(0, 0)
+# on Linux), so it is NOT part of this launcher's or the Neutralino
+# binary's process group. app.exit()/app.killProcess() only ever signal
+# the Neutralino server's own PID, never Chrome's - so on an unclean
+# exit (Ctrl-C, a window-manager force-quit, a crash) Chrome and its
+# profile lock (SingletonLock/SingletonSocket/SingletonCookie under
+# .tmp/chromedata) are orphaned, and the next launch hits Chrome's own
+# singleton-instance check and silently hands off to that orphan instead
+# of starting fresh ("Opening in existing browser session."), which also
+# means that window is never wired to app-init.js's close handling.
+# Without this, every .deb launch (not just the AppImage) leaks a Chrome
+# process on any exit that isn't a clean quit through the app UI.
 cat > "${PKGROOT}/usr/bin/arktube" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
 DATA_HOME="${XDG_DATA_HOME:-${HOME}/.local/share}"
 ARKTUBE_DATA_DIR="${DATA_HOME}/ARKtube"
 mkdir -p "${ARKTUBE_DATA_DIR}"
-exec /usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "$@"
+
+CHROME_PROFILE_DIR="${ARKTUBE_DATA_DIR}/.tmp/chromedata"
+CHROME_LOCK_PATTERN="--user-data-dir=${CHROME_PROFILE_DIR}"
+
+reap_stale_chrome() {
+    if command -v pgrep >/dev/null 2>&1; then
+        local pids
+        pids="$(pgrep -f -- "${CHROME_LOCK_PATTERN}" 2>/dev/null || true)"
+        if [ -n "${pids}" ]; then
+            echo "ARKtube: cleaning up a leftover browser process from a previous run..." >&2
+            # shellcheck disable=SC2086
+            kill -TERM ${pids} 2>/dev/null || true
+            sleep 1
+            # shellcheck disable=SC2086
+            kill -KILL ${pids} 2>/dev/null || true
+        fi
+    fi
+    rm -f "${CHROME_PROFILE_DIR}/SingletonLock" \
+          "${CHROME_PROFILE_DIR}/SingletonSocket" \
+          "${CHROME_PROFILE_DIR}/SingletonCookie" 2>/dev/null || true
+}
+
+reap_stale_chrome
+trap reap_stale_chrome EXIT INT TERM
+
+/usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "$@"
 LAUNCHER
 chmod 755 "${PKGROOT}/usr/bin/arktube"
 
