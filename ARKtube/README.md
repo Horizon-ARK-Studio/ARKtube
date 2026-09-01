@@ -87,9 +87,45 @@ before reaching for `browser`/Chrome mode).
 **Specific risk with `/tv`:** unlike the desktop site, `youtube.com/tv` is
 normally only served to recognized TV/set-top-box user agents — a plain
 WebKitGTK UA may get redirected back to `youtube.com` or shown an
-unsupported-device page. If that happens, the first thing to try is a
-`window.extendUserAgentWith` override in `neutralino.config.json` before
-falling back to the desktop `url`.
+unsupported-device page.
+
+Two fallbacks are already wired for this, in the order to try them:
+
+1. **`modes.window.extendUserAgentWith`** (set in `neutralino.config.json`)
+   appends a Cobalt/PS4 device-token suffix to WebKitGTK's *default* UA
+   string. This is a config-only, no-rebuild change, but be clear about
+   what it actually produces: Neutralino's `extendUserAgentWith` **appends**
+   to the platform UA, it does not replace it. The resulting string is a
+   genuine desktop-Linux WebKitGTK UA with TV tokens bolted onto the end
+   (`Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 ... Safari/605.1.15
+   (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;`), not a clean
+   Cobalt UA. Whether that's enough depends entirely on whether YouTube's
+   TV-client check does a loose substring match for `Cobalt/` /
+   `PlayStation` anywhere in the string, or a stricter check that's
+   thrown off by the leading `X11; Linux` / `AppleWebKit` desktop tokens
+   still being present. Try it first because it's free; don't assume it
+   works without checking DevTools/network output.
+
+2. **`chrome` mode**, if (1) doesn't get past detection. Its `args` field
+   passes straight through to the underlying Chrome-family process's
+   `--user-agent=` flag, which *fully replaces* the UA rather than
+   appending to it — mechanically the same thing a bare
+   `chromium --user-agent="..." --app="https://www.youtube.com/tv#/"`
+   invocation does. This is the config's pre-wired fallback and is already
+   set to the same Cobalt/PS4 string.
+
+   A true full-replace *inside* native `window` mode (equivalent to
+   calling WebKitGTK's `webkit_settings_set_user_agent()` before the
+   webview is created) is **not** exposed through `neutralino.config.json`
+   or app-side JS — Neutralino's binary is precompiled, and getting that
+   call made would mean patching Neutralino's own C++ source and building
+   a custom binary. That's a real option if both fallbacks above fail, but
+   it's a materially bigger undertaking than a config change, and per the
+   project's own failure-mode policy (`docs/PROBLEM-STATEMENT.md` §22:
+   "fail gracefully instead of trying to impersonate a browser
+   indefinitely"), the right next step at that point is falling back to
+   the desktop `url`, not building and maintaining a forked Neutralino
+   binary just to keep `/tv` working.
 
 ## Known constraints found while scaffolding this
 
