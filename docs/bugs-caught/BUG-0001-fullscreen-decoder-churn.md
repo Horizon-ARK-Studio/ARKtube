@@ -97,11 +97,64 @@ tracked here regardless of what quality it's churning at.
 Not yet identified — diagnosis is still open. Do not guess-and-patch native code again
 without first isolating native-code-cause vs. page-side-cause (see Notes).
 
+**Update 2026-09-01, later same day:** A concrete, code-level root-cause candidate was
+found by re-reading every script in `ArkTubeScripts.kt` against the pattern this
+codebase already uses (and had already fixed twice) for repeated-report functions: an
+operation that's only safe once per state transition must not be re-run on every
+repeated report (see `MediaPlaybackService.updatePlaybackState()`'s own doc comment for
+the `wasPlaying` guard fixed in `970513d`, and the `surfaceViewZOrderNeutralized` guard
+fixed in `a44d394`). `VIDEO_SIZE_REPORT_JS`'s `reportSize()` and `MEDIA_SESSION_JS`'s
+`reportInfo()` both have that guard (`if (x === lastReportedX) return`).
+`THEME_SYNC_JS`'s `report()` did **not** — it unconditionally called
+`window.ArkTubeTheme.onThemeChanged(dark, bg)` every time it ran, with zero check
+against what was last reported.
+
+`report()` is wired to two triggers: a `MutationObserver` on `<html>`/`<body>`
+attributes (which YouTube's SPA mutates constantly during normal playback -- scroll
+lock, player-active state, ad states, etc.) and, as a backstop, `setInterval(report,
+2000)` — **a literal 2000ms period**, which lines up almost exactly with this bug's
+captured ~2.1s stop/release cadence. Every one of those calls reaches
+`MainActivity`'s `themeListener` → `StatusBarThemeApplier.apply()`, which itself also
+had no dedupe and unconditionally rewrote `window.statusBarColor`,
+`window.navigationBarColor`, and both `WindowInsetsControllerCompat` appearance flags
+on every call — real window/inset writes, not no-ops, even when the color was
+identical to the previous call.
+
+**Fix implemented (unverified on-device):**
+- `THEME_SYNC_JS`'s `report()` (`webview/ArkTubeScripts.kt`) now tracks
+  `lastReportedDark`/`lastReportedBg` and returns early when neither has changed,
+  matching `reportSize()`/`reportInfo()`'s existing shape.
+- `StatusBarThemeApplier.apply()` (`theme/StatusBarThemeApplier.kt`) also now tracks
+  `lastAppliedColor`/`lastAppliedIsDark` and no-ops on a redundant call, as
+  defense-in-depth independent of the JS-side fix.
+
+This directly explains the *cadence* (2000ms interval, matching the ~2.1s captured
+gap) and identifies a genuine, previously-unguarded repeated native-window-write path
+triggered from WebView JS on every theme-sync tick — which fits "the playback pause is
+caused by something interacting with the WebView incorrectly" exactly. It does **not**
+yet explain, with hard evidence, *why* repeatedly rewriting `statusBarColor`/inset
+appearance flags would specifically cause the AV1 decoder to release/recreate rather
+than just being wasted work — that mechanism (window/inset churn forcing a
+WebView surface reconfiguration) is plausible given Android's edge-to-edge/inset
+system but not yet confirmed against a captured trace. Per this bug's own prior notes
+and BUG-0003's notes, this should not be treated as fixed until logcat confirms the
+decoder-churn cadence actually stops after this change.
+
 ## Test
 
 TBD once root cause is confirmed. At minimum: play a video for 60s+ stationary,
 in-page, and confirm zero unexpected `MediaCodec`/`AudioTrack` release-recreate cycles
 in logcat.
+
+**Added by the 2026-09-01 update above:** with the fix in place, also confirm via
+logcat that `ArkLogger`'s `StatusBarThemeApplier.apply` / `themeListener` track logs
+now fire only on genuine theme changes (once per page load, plus real light/dark
+toggles) rather than on a ~2s cadence. If the decoder-churn loop stops in the same
+capture where those logs also stop firing on a timer, that's strong confirming
+evidence for this root cause; if the churn continues even with theme-sync calls now
+suppressed, this fix should be considered ruled out (not just insufficient) and the
+next candidate (page-side/YouTube-player ABR behavior, per the CORS/low-resolution
+hypothesis below) should be investigated instead.
 
 ## Notes
 

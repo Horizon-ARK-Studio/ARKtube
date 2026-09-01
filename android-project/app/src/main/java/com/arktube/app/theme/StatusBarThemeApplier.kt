@@ -9,13 +9,32 @@ import com.arktube.app.logging.ArkLogger
  * YouTube actually rendering (falling back to a plain light/dark
  * swatch if that color couldn't be read), and flips the bar icons'
  * own appearance so they stay legible against it.
+ *
+ * [apply] itself also guards against redundant writes (skips if the
+ * resolved color/darkness already match the last call) as
+ * defense-in-depth: THEME_SYNC_JS's own `report()` now dedupes before
+ * it ever calls the bridge (see that constant's doc comment and
+ * BUG-0001 in docs/bugs-caught/), but this is a cheap second line of
+ * defense against the same "reassert an already-current value" shape
+ * from any future caller, the same instinct as `wasPlaying` in
+ * MediaPlaybackService.updatePlaybackState().
  */
 class StatusBarThemeApplier(private val window: Window) {
+
+    private var lastAppliedColor: Int? = null
+    private var lastAppliedIsDark: Boolean? = null
 
     fun apply(isDark: Boolean, cssBackground: String?) {
         ArkLogger.track(COMPONENT, "apply") {
             val barColor = CssColorParser.parse(cssBackground)
                 ?: if (isDark) FALLBACK_DARK_COLOR else FALLBACK_LIGHT_COLOR
+
+            if (barColor == lastAppliedColor && isDark == lastAppliedIsDark) {
+                ArkLogger.d(COMPONENT, "apply: no-op, color/darkness unchanged")
+                return@track
+            }
+            lastAppliedColor = barColor
+            lastAppliedIsDark = isDark
 
             window.statusBarColor = barColor
             window.navigationBarColor = barColor

@@ -90,10 +90,36 @@ object ArkTubeScripts {
     // Reports YouTube's actual rendered page background back to
     // ThemeBridge, so the status/nav bar can match *YouTube's*
     // light/dark toggle specifically, not the phone's system theme.
+    //
+    // report() is wired to two triggers: a MutationObserver on
+    // <html>/<body> attributes (YouTube's SPA toggles classes on both
+    // constantly -- scroll-lock, player-active, ad states, etc.) and
+    // a 2000ms setInterval as a backstop for changes the observer
+    // might miss. Both call report() far more often than the theme
+    // actually changes, which is exactly why -- unlike this same
+    // function in an earlier revision -- it now checks
+    // lastReportedDark/lastReportedBg before calling the bridge at
+    // all: see BUG-0001 in docs/bugs-caught/. Without that guard this
+    // was posting an identical onThemeChanged() call to native code
+    // roughly every 2 seconds (matching BUG-0001's observed decoder-
+    // churn cadence almost exactly) even when nothing about the theme
+    // had changed, and StatusBarThemeApplier.apply() unconditionally
+    // rewrote window.statusBarColor/navigationBarColor and the
+    // WindowInsetsController appearance flags on every single one of
+    // those calls -- the same "operation that's only safe once per
+    // state transition, instead re-run on every repeated report"
+    // shape as the SurfaceView z-order bug and the AUDIOFOCUS_GAIN
+    // bug elsewhere in this app (see MediaPlaybackService's
+    // updatePlaybackState() doc comment), just not yet given the same
+    // dedupe treatment VIDEO_SIZE_REPORT_JS/MEDIA_SESSION_JS's own
+    // report functions already have.
     const val THEME_SYNC_JS = """
         (function() {
             if (window.__arktubeThemeSyncInstalled) { return; }
             window.__arktubeThemeSyncInstalled = true;
+
+            var lastReportedDark = null;
+            var lastReportedBg = null;
 
             function readBackground(el) {
                 if (!el) { return null; }
@@ -120,9 +146,15 @@ object ArkTubeScripts {
                     bg = readBackground(document.documentElement);
                     dark = isDark(bg);
                 }
-                if (dark !== null && window.ArkTubeTheme) {
-                    window.ArkTubeTheme.onThemeChanged(dark, bg);
-                }
+                if (dark === null || !window.ArkTubeTheme) { return; }
+                // The dedupe check this function was missing: skip
+                // the native call entirely when neither value has
+                // actually changed since the last report, regardless
+                // of which trigger (interval or mutation) fired.
+                if (dark === lastReportedDark && bg === lastReportedBg) { return; }
+                lastReportedDark = dark;
+                lastReportedBg = bg;
+                window.ArkTubeTheme.onThemeChanged(dark, bg);
             }
 
             report();
