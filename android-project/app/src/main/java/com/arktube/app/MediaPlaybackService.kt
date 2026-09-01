@@ -198,8 +198,26 @@ class MediaPlaybackService : Service() {
      * reports a play/pause/seeked/timeupdate event, so this reflects
      * what's *actually* happening on the page, not just the last
      * command a native control sent it.
+     *
+     * IMPORTANT: MEDIA_SESSION_JS reports playback state on every
+     * throttled `timeupdate` tick (roughly once a second) for as long
+     * as the video keeps playing, not just once when it actually
+     * starts -- so this runs with `playing == true` continuously
+     * during normal playback, not just on the false->true edge.
+     * requestAudioFocus() below must only fire on that edge (tracked
+     * via `wasPlaying`): re-requesting AUDIOFOCUS_GAIN on every one
+     * of those repeated "still playing" reports competes with
+     * WebView/Chromium's own internal audio focus handling for the
+     * same <video> element it's actively playing, knocking Chromium's
+     * focus loose and making it pause the real HTML5 video -- which
+     * is what was showing up as playback pausing instantly and
+     * repeatedly right after starting. Same failure shape as the
+     * SurfaceView z-order bug elsewhere in this app: an operation
+     * that's only safe once per state transition was instead being
+     * re-run on every repeated report.
      */
     fun updatePlaybackState(playing: Boolean, positionMs: Long, playbackSpeed: Float) {
+        val wasPlaying = isPlaying
         isPlaying = playing
         val actions = PlaybackStateCompat.ACTION_PLAY or
             PlaybackStateCompat.ACTION_PAUSE or
@@ -216,7 +234,9 @@ class MediaPlaybackService : Service() {
                 .build()
         )
         if (playing) {
-            requestAudioFocus()
+            if (!wasPlaying) {
+                requestAudioFocus()
+            }
             startForegroundWithNotification()
         } else {
             updateNotification()
