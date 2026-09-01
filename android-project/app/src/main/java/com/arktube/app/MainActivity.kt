@@ -184,6 +184,18 @@ class MainActivity : AppCompatActivity() {
     private var fullscreenContainer: FrameLayout? = null
     private var stretchToggleButton: Button? = null
 
+    // Tracks whether neutralizeSurfaceViewZOrder() has already found
+    // and acted on a real SurfaceView this fullscreen session. Reset
+    // to false in onShowCustomView() (a fresh session, possibly
+    // racing a not-yet-attached SurfaceView) and left true forever
+    // after the first success, so buildFullscreenContainer()'s layout
+    // listener stops re-invoking the z-order setters once they've
+    // actually taken effect -- see neutralizeSurfaceViewZOrder()'s own
+    // doc comment for why calling them repeatedly on an
+    // already-neutralized, actively-rendering Surface is itself a bug
+    // (it was what caused fullscreen video to pause/resume in a loop).
+    private var surfaceViewZOrderNeutralized = false
+
     // Persisted so the choice survives fullscreen exit/re-entry and
     // app restarts, not just the current fullscreen session.
     private lateinit var prefs: android.content.SharedPreferences
@@ -416,13 +428,12 @@ class MainActivity : AppCompatActivity() {
                 }
                 customView = view
                 customViewCallback = callback
-                // Must happen before this View is ever attached/drawn:
-                // see neutralizeSurfaceViewZOrder()'s own doc comment
-                // for why any SurfaceView buried inside it otherwise
-                // paints above every normal View in the window --
-                // including our own stretch-to-fill button -- no
-                // matter where that button sits in the layout.
-                neutralizeSurfaceViewZOrder(view)
+                // Fresh session -- may or may not race a
+                // not-yet-attached SurfaceView (see
+                // neutralizeSurfaceViewZOrder()'s doc comment); the
+                // layout listener installed by buildFullscreenContainer()
+                // keeps checking until this flips true, then stops.
+                surfaceViewZOrderNeutralized = neutralizeSurfaceViewZOrder(view)
                 val container = buildFullscreenContainer(view)
                 fullscreenContainer = container
                 // Added as a second child of rootLayout, on top of
@@ -485,6 +496,7 @@ class MainActivity : AppCompatActivity() {
                 customView = null
                 customViewCallback?.onCustomViewHidden()
                 customViewCallback = null
+                surfaceViewZOrderNeutralized = false
                 lastVideoWidth = 0
                 lastVideoHeight = 0
                 window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -710,22 +722,18 @@ class MainActivity : AppCompatActivity() {
         // and come out wrong (or not apply at all) after rotating to
         // landscape, or vice versa.
         container.viewTreeObserver.addOnGlobalLayoutListener {
-            // Chromium doesn't necessarily attach the actual
-            // hardware-composited SurfaceView synchronously inside
-            // `video` by the time onShowCustomView() returns -- it's
-            // common for that inner SurfaceView to be added a frame
-            // or more later, once the underlying Surface is actually
-            // created. The one-time neutralizeSurfaceViewZOrder(view)
-            // call in onShowCustomView() walks the tree *before* that
-            // child exists in that case, finds nothing, and never
-            // runs again -- which is exactly how the button/other
-            // overlays could stay unreachable even though the crop
-            // itself (driven by separate width/height fields, not
-            // this tree) still worked. Re-walking on every layout
-            // pass here catches a late-attached SurfaceView as soon
-            // as it shows up instead of only checking once up front.
-            // Idempotent and cheap, so safe to call unconditionally.
-            neutralizeSurfaceViewZOrder(container)
+            // Only keep checking for a late-attached SurfaceView (see
+            // neutralizeSurfaceViewZOrder()'s doc comment for why
+            // onShowCustomView()'s own synchronous attempt can race
+            // one) until it's actually been found and neutralized
+            // once. After that, deliberately leave it alone: calling
+            // the z-order setters again on an already-neutralized,
+            // actively-rendering Surface forces a live reconfiguration
+            // of it in the compositor, which is what was causing
+            // fullscreen video to pause and resume in a loop.
+            if (!surfaceViewZOrderNeutralized) {
+                surfaceViewZOrderNeutralized = neutralizeSurfaceViewZOrder(container)
+            }
             applyNativeZoomCrop()
         }
         ViewCompat.setOnApplyWindowInsetsListener(container) { _, insets ->
@@ -738,7 +746,9 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * Recursively strips any SurfaceView inside `root` of the
-     * z-order flags that let it paint above the rest of the window.
+     * z-order flags that let it paint above the rest of the window,
+     * and reports whether a SurfaceView was actually found (and
+     * therefore acted on) anywhere in the tree.
      *
      * This is the actual fix for the stretch-to-fill button (and any
      * other native overlay) being invisible/untouchable once
@@ -767,21 +777,41 @@ class MainActivity : AppCompatActivity() {
      * add-order correctly) but effectively didn't matter while the
      * button wasn't visibly reachable to tap in the first place.
      *
-     * Must run before `root` is attached to the window -- the flags
-     * take effect based on the SurfaceView's state as its Surface is
-     * created, not continuously, so setting them post-attach can be a
-     * frame or two late.
+     * IMPORTANT: this must only actually run the setters *once* per
+     * fullscreen session (see the found-tracking in
+     * buildFullscreenContainer()'s layout listener), not on every
+     * layout pass. setZOrderOnTop()/setZOrderMediaOverlay() aren't a
+     * free, idempotent style toggle -- Android's own docs note the
+     * Z-order can be changed *dynamically* on an already-created
+     * Surface (API 30+), meaning calling this again on a SurfaceView
+     * that's already been neutralized forces a live reconfiguration
+     * of that Surface's place in the compositor while the video
+     * decoder is actively writing frames into it. Re-invoking it on
+     * every layout pass -- which fires often, between rotation/inset
+     * settling and this very crop's own scaleX/scaleY writes -- was
+     * exactly what caused fullscreen video to pause and resume in a
+     * tight loop: from the player's perspective its rendering surface
+     * kept appearing to be torn down and reattached. Catching a
+     * late-attached SurfaceView still needs *some* repeated checking
+     * (see the class doc on the original one-shot version's race),
+     * but the checking should stop, and the flags should never be
+     * touched again, the moment a SurfaceView is actually found.
      */
-    private fun neutralizeSurfaceViewZOrder(root: android.view.View) {
+    private fun neutralizeSurfaceViewZOrder(root: android.view.View): Boolean {
+        var found = false
         if (root is SurfaceView) {
             root.setZOrderOnTop(false)
             root.setZOrderMediaOverlay(false)
+            found = true
         }
         if (root is ViewGroup) {
             for (i in 0 until root.childCount) {
-                neutralizeSurfaceViewZOrder(root.getChildAt(i))
+                if (neutralizeSurfaceViewZOrder(root.getChildAt(i))) {
+                    found = true
+                }
             }
         }
+        return found
     }
 
     /**
