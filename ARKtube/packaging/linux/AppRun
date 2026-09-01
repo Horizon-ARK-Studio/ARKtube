@@ -2,7 +2,7 @@
 #
 # AppRun - AppImage entrypoint for ARKtube.
 #
-# Two jobs, both documented in docs/BUGS-CAUGHT.md:
+# Three jobs, all documented in docs/BUGS-CAUGHT.md:
 #
 #   1. Point Neutralino's NL_PATH at a writable directory instead of the
 #      read-only squashfs mount, so its internal ".tmp" working-storage
@@ -12,6 +12,10 @@
 #   2. Make sure GPU compositing / accelerated video decode aren't
 #      silently disabled, so WebKitGTK's playback quality matches what
 #      Firefox gets on the same machine.
+#   3. Make sure the Chrome-mode browser process is actually cleaned up
+#      when the app closes, and that a leftover instance from a previous
+#      unclean shutdown doesn't silently hijack the next launch instead
+#      of starting fresh ("Opening in existing browser session.").
 #
 set -euo pipefail
 
@@ -47,4 +51,62 @@ export GST_VAAPI_ALL_DRIVERS=1
 # the environment (e.g. by the user, matching what they use for Firefox
 # or mpv), it's left alone and simply inherited below.
 
-exec "${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "$@"
+# --- 3. Chrome-mode process lifecycle ------------------------------------
+# Neutralino's chrome mode (chrome.cpp) always launches Chrome/Chromium
+# against "${ARKTUBE_DATA_DIR}/.tmp/chromedata" as its --user-data-dir -
+# that's Neutralino's own unconditional internal default, not something
+# this project configures, and thanks to job 1 above it's already a
+# persistent path. Cookies/session state already survive between launches
+# on their own; nothing needs adding to neutralino.config.json for that.
+#
+# The actual problem is that Neutralino spawns Chrome as a fully-detached
+# background process (TinyProcessLib::Process, which calls setpgid(0, 0)
+# on Linux - see lib/tinyprocess/process_unix.cpp upstream), so it is
+# NOT part of this script's or the Neutralino binary's process group, and
+# app::exit()/app.killProcess() only ever signal the Neutralino server's
+# own PID (api/app/app.cpp), never Chrome's. If ARKtube closes uncleanly
+# (Ctrl-C, a window-manager force-quit, a crash) the Chrome process and
+# its profile lock (SingletonLock/SingletonSocket/SingletonCookie under
+# .tmp/chromedata) are orphaned. The next launch then hits Chrome's own
+# singleton-instance check, hands off to that orphan, and prints
+# "Opening in existing browser session." instead of starting fresh -
+# which also means that window was never wired to *this* run's
+# app-init.js close handling, and orphans keep piling up across runs.
+#
+# CHROME_LOCK_PATTERN is unique to this app's own dedicated profile
+# directory (under our own XDG_DATA_HOME/ARKtube, never the user's real
+# browser profile), so matching on it can't touch any other Chrome
+# window the user has open.
+CHROME_PROFILE_DIR="${ARKTUBE_DATA_DIR}/.tmp/chromedata"
+CHROME_LOCK_PATTERN="--user-data-dir=${CHROME_PROFILE_DIR}"
+
+reap_stale_chrome() {
+    if command -v pgrep >/dev/null 2>&1; then
+        local pids
+        pids="$(pgrep -f -- "${CHROME_LOCK_PATTERN}" 2>/dev/null || true)"
+        if [ -n "${pids}" ]; then
+            echo "ARKtube: cleaning up a leftover browser process from a previous run..." >&2
+            # shellcheck disable=SC2086
+            kill -TERM ${pids} 2>/dev/null || true
+            sleep 1
+            # shellcheck disable=SC2086
+            kill -KILL ${pids} 2>/dev/null || true
+        fi
+    fi
+    # A crashed/hard-killed process can leave these lock files behind with
+    # no live PID holding them - Chrome treats their mere presence as
+    # "another instance owns this profile" and refuses to start cleanly,
+    # so clear them unconditionally once we've made sure nothing's using them.
+    rm -f "${CHROME_PROFILE_DIR}/SingletonLock" \
+          "${CHROME_PROFILE_DIR}/SingletonSocket" \
+          "${CHROME_PROFILE_DIR}/SingletonCookie" 2>/dev/null || true
+}
+
+# Clean up anything the *previous* run left behind before we start.
+reap_stale_chrome
+
+# And clean up after *this* run however it ends, so the next launch
+# doesn't inherit the problem.
+trap reap_stale_chrome EXIT INT TERM
+
+"${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "$@"

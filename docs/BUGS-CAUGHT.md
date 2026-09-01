@@ -141,17 +141,81 @@ runtime"*).
    Intel), `i965` (older Intel), `radeonsi` (AMD), or `nvidia`
    (proprietary NVIDIA driver with `nvidia-vaapi-driver`).
 
-## 5. Files changed
+## 5. Chrome mode: "Opening in existing browser session." on every relaunch
+
+Repeated launches of the AppImage (`defaultMode: "chrome"`, per
+`neutralino.config.json`) print `Opening in existing browser session.` on
+the second and later runs instead of opening a fresh app window, and the
+process list accumulates extra PIDs across runs that never seem to exit.
+
+It's tempting to read this as a missing/misconfigured `--user-data-dir`
+(some AI-generated advice circulating for this exact symptom says
+that), but that's not what's happening here, and adding one to
+`modes.chrome.args` would just create a *second*, differently-located
+profile alongside the one Neutralino already manages — not fix
+anything. Checked directly against Neutralino's own source
+(`chrome.cpp`):
+
+```cpp
+chromeCmd += " --user-data-dir=\"" + settings::joinAppDataPath("/.tmp/chromedata") + "\"";
+```
+
+This is unconditional — chrome mode always sets `--user-data-dir`, with
+no config path that omits it. `joinAppDataPath` resolves against
+`appDataPath`, which defaults to `appPath` (`settings.cpp`), which is
+exactly the directory job 3's `--path="${ARKTUBE_DATA_DIR}"` (§3 above)
+already points at `$XDG_DATA_HOME/ARKtube`. So the profile directory —
+`$XDG_DATA_HOME/ARKtube/.tmp/chromedata` — is already persistent purely
+as a side effect of the fix in §3; cookies and login state already
+survive between clean launches on their own.
+
+**Actual root cause:** process lifecycle, not path configuration.
+`chrome.cpp` spawns the browser via `os::execCommand(..., {background:
+true})`, which on Linux (`lib/tinyprocess/process_unix.cpp`) calls
+`setpgid(0, 0)` on the child right after `fork()` — putting Chrome in
+its own process group, detached from the Neutralino server. Separately,
+`app::exit()` and `app.killProcess()` (`api/app/app.cpp`) only ever
+signal `getpid()`, i.e. the Neutralino server's own PID — never the
+Chrome child. So:
+
+- A terminal `Ctrl-C` only reaches processes in the terminal's
+  foreground process group, and Chrome isn't in it.
+- `Neutralino.app.exit()`, called from `app-init.js`'s `windowClose`
+  handler, only stops the Neutralino server.
+
+Either way, Chrome is orphaned and keeps running, still holding
+`.tmp/chromedata/SingletonLock`. The next launch hits Chrome's own
+singleton-instance check against that lock and hands off to the
+orphan instead of starting fresh — hence the message — and that
+orphaned window was never wired to *this* run's `app-init.js`, so its
+close handling, tray, etc. are all dead. Repeat a few times and you get
+exactly what the process list shows: one live app window backed by
+whichever orphan happened to win the handoff, plus a pile of unreachable
+zombies underneath it.
+
+**Fix:** `packaging/linux/AppRun` now reaps stale Chrome instances tied
+to *this app's own* profile directory (matched by the literal
+`--user-data-dir=.../chromedata` value in their command line, so it can
+never touch the user's actual browser profile) both before launch — in
+case the previous run left one behind — and via an `EXIT`/`INT`/`TERM`
+trap, so this run cleans up after itself too, however it ends. This
+required dropping the `exec` used to launch the Neutralino binary (a
+trap can't run after `exec` replaces the shell process), replaced with a
+plain foreground invocation — signal delivery to the Neutralino binary
+itself is unaffected, since it's still the script's only foreground
+child.
+
+## 6. Files changed
 
 | File | Change |
 |---|---|
 | `ARKtube/neutralino.config.json` | Pin `binaryVersion`/`clientVersion` to `6.8.0` (was `nightly`) |
-| `ARKtube/packaging/linux/AppRun` | **New.** AppImage entrypoint: writable `--path`, hardware-accel env vars |
+| `ARKtube/packaging/linux/AppRun` | Writable `--path`, hardware-accel env vars, **and now**: reap stale/orphaned Chrome-mode processes before launch and on exit (§5) |
 | `ARKtube/packaging/linux/ARKtube.desktop` | **New.** Desktop entry for AppImage integration |
 | `ARKtube/packaging/linux/build-appimage.sh` | **New.** Reproducible build script (`--embed-resources` + AppDir assembly) |
 | `README.md` | New "Linux: building the AppImage" and "Linux: hardware-accelerated playback" sections |
 
-## 6. Verification steps
+## 7. Verification steps
 
 ```bash
 cd ARKtube/
@@ -170,7 +234,16 @@ an active decode profile while a video is playing (check with
 utilization, since VA-API can be "available" without every video
 actually using it depending on codec).
 
-## 7. Non-goals
+For §5, specifically:
+
+```bash
+./ARKtube-x86_64.AppImage &   # launch, sign into YouTube, then Ctrl-C the terminal
+pgrep -fa chromedata          # should show nothing once the trap has run
+./ARKtube-x86_64.AppImage     # should NOT print "Opening in existing browser session."
+                               # and should still be signed in
+```
+
+## 8. Non-goals
 
 This proposal does not touch:
 - the navigation/state-persistence architecture described in
