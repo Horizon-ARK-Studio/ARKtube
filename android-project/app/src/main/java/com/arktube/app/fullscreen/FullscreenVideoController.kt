@@ -39,7 +39,17 @@ class FullscreenVideoController(
     private val activity: Activity,
     private val rootLayout: FrameLayout,
     private val forceFillPreference: ForceFillPreference,
-    private val zoomCropStrategy: ZoomCropStrategy = LetterboxZoomCropStrategy()
+    private val zoomCropStrategy: ZoomCropStrategy = LetterboxZoomCropStrategy(),
+    // Called once native fullscreen teardown is complete, so the caller
+    // can force a page-side reflow (see LayoutReflowHelper) right at the
+    // moment we *know* the exit happened -- instead of only reacting if
+    // and when Android happens to also deliver an onConfigurationChanged()
+    // callback afterward, which is a real gap: YouTube's own player-mode
+    // JS (not just the "Up next" row LayoutReflowHelper was originally
+    // written for) can be left believing it's still in the landscape/
+    // fullscreen layout if that callback doesn't fire, or fires before
+    // this teardown is actually done.
+    private val onExitFullscreen: () -> Unit = {}
 ) {
 
     private var customView: View? = null
@@ -94,6 +104,7 @@ class FullscreenVideoController(
             activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             exitImmersiveFullscreen()
             activity.requestedOrientation = preFullscreenOrientation
+            onExitFullscreen()
         }
     }
 
@@ -162,11 +173,33 @@ class FullscreenVideoController(
         rootLayout.addView(button, buttonParams)
     }
 
+    /**
+     * `forceFillPreference.isEnabled` is being used here as a manual
+     * escape hatch back to an *unscaled* view -- not, as the name and
+     * original threshold-nudge design implied, a way to crop more
+     * aggressively. See the conversation/investigation notes for why:
+     * `view.scaleX/scaleY` transforms the *entire* opaque Chromium
+     * fullscreen surface uniformly, including any native player-control
+     * chrome (captions, settings) baked into that same surface -- past
+     * a real crop factor, controls anchored near the original edges get
+     * pushed outside the container's clip bounds with no way to reach
+     * them. The only way back is to undo the transform entirely, which
+     * is what this branch does, bypassing ZoomCropStrategy altogether
+     * rather than just nudging its threshold (the old behavior had no
+     * path that could ever produce scale=1f once real letterboxing was
+     * already being auto-cropped, so toggling it was a no-op for
+     * exactly the case this button exists to solve).
+     */
     private fun applyZoomCrop() {
         val view = customView ?: return
+        if (forceFillPreference.isEnabled) {
+            view.scaleX = 1f
+            view.scaleY = 1f
+            return
+        }
         val containerW = view.width
         val containerH = view.height
-        val result = zoomCropStrategy.compute(containerW, containerH, lastVideoWidth, lastVideoHeight, forceFillPreference.isEnabled)
+        val result = zoomCropStrategy.compute(containerW, containerH, lastVideoWidth, lastVideoHeight, false)
         if (!result.shouldApply) {
             view.scaleX = 1f
             view.scaleY = 1f
@@ -219,6 +252,23 @@ class FullscreenVideoController(
         val controller = WindowInsetsControllerCompat(activity.window, activity.window.decorView)
         controller.show(WindowInsetsCompat.Type.systemBars())
         WindowCompat.setDecorFitsSystemWindows(activity.window, true)
+        // setDecorFitsSystemWindows(true) tells Android to resume
+        // auto-padding content around system bars/the display cutout,
+        // but it doesn't by itself force a *new* WindowInsets dispatch --
+        // the decor view keeps whatever insets it was last actually
+        // handed (computed for the landscape/immersive window state)
+        // until something triggers a fresh pass. A real device rotation
+        // normally carries that along for free via Activity recreation,
+        // but AndroidManifest.xml's `configChanges="orientation|..."`
+        // deliberately opts out of recreation, so it also opts out of
+        // whatever insets redispatch would have ridden along with it --
+        // same reason onConfigurationChanged() has to explicitly drive
+        // LayoutReflowHelper.reflow() instead of assuming it happens on
+        // its own. Left unrequested, this is what shows up as a
+        // leftover cutout-shaped padding strip after exiting fullscreen
+        // back to portrait, that only clears on a full app restart
+        // (i.e. a genuinely new window/decor view/insets dispatch).
+        ViewCompat.requestApplyInsets(activity.window.decorView)
     }
 
     private fun dpToPx(dp: Int): Int = TypedValue.applyDimension(

@@ -31,7 +31,11 @@ object StretchToggleButtonFactory {
     }
 
     fun applyAppearance(button: Button, forceFillEnabled: Boolean) {
-        button.text = if (forceFillEnabled) "FILL\u2713" else "FILL"
+        // forceFillEnabled here means "unscaled override active" (see
+        // FullscreenVideoController.applyZoomCrop()) -- checked state
+        // is the escape hatch back to Chromium's real controls, not
+        // "more aggressive crop" as the preference's name still implies.
+        button.text = if (forceFillEnabled) "FIT\u2713" else "FILL"
         button.alpha = if (forceFillEnabled) 1f else 0.6f
     }
 }

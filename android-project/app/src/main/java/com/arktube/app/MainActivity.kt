@@ -99,7 +99,18 @@ class MainActivity : AppCompatActivity() {
             rootLayout = FrameLayout(this)
             setContentView(rootLayout)
 
-            fullscreenController = FullscreenVideoController(this, rootLayout, forceFillPreference)
+            // The exit-fullscreen callback references layoutReflowHelper
+            // lazily (same pattern as mediaSessionCoordinator's { webView }
+            // provider just below) -- it's a lateinit var not yet assigned
+            // at this point in onCreate(), but the lambda itself only runs
+            // later, from hideCustomView(), by which point onCreate() has
+            // finished and layoutReflowHelper definitely exists.
+            fullscreenController = FullscreenVideoController(
+                activity = this,
+                rootLayout = rootLayout,
+                forceFillPreference = forceFillPreference,
+                onExitFullscreen = { layoutReflowHelper.reflow { fullscreenController.isShowing } }
+            )
             // Safe to construct before webView exists: the { webView }
             // provider lambda only reads the lateinit property lazily,
             // the first time a transport command actually needs it.

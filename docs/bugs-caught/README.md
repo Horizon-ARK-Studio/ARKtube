@@ -53,6 +53,19 @@ Template:
   letterbox/pillarbox baked into the encoded video itself — `Medium`.
 - [BUG-0003](./BUG-0003-orientation-lock-unconfirmed.md): Fullscreen orientation lock
   possibly self-reasserting — `Low`, unconfirmed, needs dedicated repro.
+- [BUG-0004](./BUG-0004-audio-focus-ping-pong.md): Native `AudioFocusRequest` fights
+  WebView's own focus request, causing an immediate re-pause on every Play tap —
+  `Critical`, diagnostic logging added, root cause traced but unconfirmed on-device.
+- [BUG-0005](./BUG-0005-fullscreen-exit-page-reflow-gap.md): YouTube's page-side
+  player-layout JS stays in landscape/fullscreen mode after exiting native fullscreen —
+  `Medium`, fix implemented, unverified on-device.
+- [BUG-0006](./BUG-0006-stale-cutout-insets-after-exit.md): Leftover display-cutout
+  padding strip after exiting fullscreen, only clears on app restart — `Medium`, fix
+  implemented, unverified on-device.
+- [BUG-0007](./BUG-0007-zoom-crop-hides-controls-button-noop.md): Zoom-to-fill scales
+  YouTube's control chrome off-screen; the stretch-toggle button couldn't undo it —
+  `Medium`, button behavior fixed, the underlying control-visibility limitation
+  documented as open.
 
 ---
 

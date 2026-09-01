@@ -106,6 +106,15 @@ class MediaPlaybackService : Service() {
     // follows, and without it the video would carry on playing under/
     // over whatever else now also wants the speaker.
     private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        // DIAGNOSTIC (BUG: play-tap-immediately-repauses) -- remove once
+        // root cause is confirmed either way. If this logs LOSS_TRANSIENT
+        // within ~tens of ms of a MEDIA_CONTROL_PLAY_JS/onPlayCommand log
+        // line, WebView/Chromium's own internal audio-focus request for
+        // the same <video> element is evicting this app's own native
+        // AudioFocusRequest -- i.e. this app is fighting itself over one
+        // physical audio stream, not receiving a genuine external
+        // interruption.
+        ArkLogger.w(COMPONENT, "onAudioFocusChange focusChange=$focusChange")
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> commandListener?.onPauseCommand()
