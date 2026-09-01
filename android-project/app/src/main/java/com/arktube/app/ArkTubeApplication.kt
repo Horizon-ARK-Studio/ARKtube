@@ -19,5 +19,12 @@ class ArkTubeApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         DynamicColors.applyToActivitiesIfAvailable(this)
+        // See NotificationSyncWorker's own class doc for what this
+        // actually does (and why it's a WorkManager poll of the
+        // user's existing YouTube login rather than a Data API/OAuth
+        // integration). Both calls are idempotent/safe to repeat on
+        // every process start.
+        NotificationSyncWorker.ensureNotificationChannel(this)
+        NotificationSyncWorker.schedule(this)
     }
 }

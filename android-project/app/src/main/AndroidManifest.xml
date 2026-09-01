@@ -38,6 +38,7 @@
             android:exported="true"
             android:screenOrientation="unspecified"
             android:configChanges="orientation|screenSize|keyboardHidden"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.ArkTubeApp.Starting">
 
             <intent-filter>

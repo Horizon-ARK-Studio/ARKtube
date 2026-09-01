@@ -91,4 +91,11 @@ dependencies {
     // MediaStyle notification helper, and MediaButtonReceiver -- see
     // MediaPlaybackService.
     implementation("androidx.media:media:1.7.0")
+    // Periodic background job for NotificationSyncWorker -- polls the
+    // user's own YouTube notification inbox (via a headless WebView
+    // reusing their existing m.youtube.com login) and mirrors new
+    // items as native Android notifications. See that class's own
+    // doc comment for why this is a WorkManager job rather than the
+    // YouTube Data API/OAuth.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
 }

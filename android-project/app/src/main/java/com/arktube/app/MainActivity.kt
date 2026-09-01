@@ -505,7 +505,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.loadUrl(SITE_URL)
+        // If this launch came from tapping a NotificationSyncWorker
+        // notification, EXTRA_OPEN_VIDEO_URL carries the specific
+        // video (or, for the overflow notification, the inbox page
+        // itself) it should open -- otherwise just load the normal
+        // home feed.
+        webView.loadUrl(intent?.getStringExtra(EXTRA_OPEN_VIDEO_URL) ?: SITE_URL)
 
         // Only a *bound* (not yet foreground) service at this point --
         // no notification exists until MediaPlaybackBridge reports
@@ -553,6 +558,27 @@ class MainActivity : AppCompatActivity() {
             mediaServiceBound = false
         }
         stopService(Intent(this, MediaPlaybackService::class.java))
+    }
+
+    /**
+     * AndroidManifest.xml declares MainActivity `launchMode="singleTask"`
+     * specifically so tapping a NotificationSyncWorker notification
+     * while the app is already running routes here -- into the
+     * existing WebView/Activity instance -- instead of onCreate()
+     * building a second one on top of it.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra(EXTRA_OPEN_VIDEO_URL)?.let { url ->
+            // Exit fullscreen first if it happened to be showing --
+            // otherwise the new page load would be happening
+            // underneath the still-visible fullscreen customView.
+            if (customView != null) {
+                webView.webChromeClient?.onHideCustomView()
+            }
+            webView.loadUrl(url)
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -1159,6 +1185,11 @@ class MainActivity : AppCompatActivity() {
 
         private const val PREFS_NAME = "arktube_prefs"
         private const val PREF_FORCE_FILL = "force_fill_enabled"
+
+        // Read by both onCreate() (cold start from a notification tap)
+        // and onNewIntent() (tapped while already running) -- see
+        // NotificationSyncWorker, which is the only place that sets it.
+        const val EXTRA_OPEN_VIDEO_URL = "arktube_open_video_url"
 
         private const val STRETCH_BUTTON_SIZE_DP = 40
         private const val STRETCH_BUTTON_MARGIN_DP = 16
