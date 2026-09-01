@@ -11,8 +11,26 @@ navigation controller yet — the only job right now is proving that
 involved):
 
 ```json
-"url": "https://www.youtube.com"
+"url": "https://www.youtube.com/tv"
 ```
+
+This targets YouTube's TV-optimized ("10-foot") interface instead of the
+regular desktop site. It's the same interface Google's own Cobalt engine
+renders on certified smart TVs — Cobalt is essentially "a shell + youtube.com/tv,"
+which is the same pairing this project is going for, just built on Neutralino's
+native webview instead of a bundled Chromium fork. It's a natural fit for a
+persistent, full-screen, keyboard/remote-driven desktop app, and it sidesteps
+some of the desktop site's heavier single-page-app navigation chrome that
+Stage 0 was already flagging as a risk (see §22/§27 in the design doc).
+
+Two shell-side changes went with it:
+- Default window size is now 1280x720 (16:9) instead of 1280x800, matching the
+  TV UI's expected aspect ratio.
+- `F11` toggles fullscreen and `Escape` exits fullscreen (without quitting the
+  app), since the TV interface is meant to be driven full-screen.
+
+Everything else about Stage 0 — no bridge exposed, `enableNativeAPI: false`
+posture toward the page — is unchanged.
 
 - `enableNativeAPI: false` and a minimal `nativeAllowList` — YouTube is treated
   as untrusted content (see design doc §23 Security). No bridge is exposed yet.
@@ -65,6 +83,13 @@ Report back what breaks — per the design doc's failure-mode section (§22),
 each failure has a defined fallback (e.g. if Google blocks the WebView user
 agent, the next experiment is `window.extendUserAgentWith` in the config
 before reaching for `browser`/Chrome mode).
+
+**Specific risk with `/tv`:** unlike the desktop site, `youtube.com/tv` is
+normally only served to recognized TV/set-top-box user agents — a plain
+WebKitGTK UA may get redirected back to `youtube.com` or shown an
+unsupported-device page. If that happens, the first thing to try is a
+`window.extendUserAgentWith` override in `neutralino.config.json` before
+falling back to the desktop `url`.
 
 ## Known constraints found while scaffolding this
 

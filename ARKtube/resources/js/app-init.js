@@ -37,6 +37,32 @@
         }
     }
 
+    async function toggleFullScreen() {
+        const isFull = await Neutralino.window.isFullScreen();
+        if (isFull) {
+            await Neutralino.window.exitFullScreen();
+        } else {
+            await Neutralino.window.setFullScreen();
+        }
+    }
+
+    function onKeyDown(e) {
+        // youtube.com/tv is built for a 10-foot, full-screen, remote-driven
+        // experience (this is the same UI Cobalt renders on certified TVs).
+        // F11 mirrors normal browser/TV-app behavior; Escape only backs out
+        // of fullscreen (it never quits the app outright).
+        if (e.key === "F11") {
+            e.preventDefault();
+            toggleFullScreen();
+        } else if (e.key === "Escape") {
+            Neutralino.window.isFullScreen().then((isFull) => {
+                if (isFull) {
+                    Neutralino.window.exitFullScreen();
+                }
+            });
+        }
+    }
+
     function setTray() {
         if (NL_MODE !== "window") {
             return;
@@ -59,6 +85,7 @@
     // fell back to the native default with no chance to run cleanup logic.
     Neutralino.events.on("windowClose", onWindowClose);
     Neutralino.events.on("trayMenuItemClicked", onTrayMenuItemClicked);
+    window.addEventListener("keydown", onKeyDown, true);
 
     // TODO: https://github.com/neutralinojs/neutralinojs/issues/615
     if (NL_OS !== "Darwin") {
