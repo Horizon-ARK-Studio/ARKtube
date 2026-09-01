@@ -51,12 +51,25 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      # Optional -- only runs if the repo has a DEBUG_KEYSTORE_B64
-      # secret configured. Writes the decoded keystore to a
-      # workspace-local file that never leaves this job's runner.
+      # Optional -- only runs if DEBUG_KEYSTORE_B64 resolves, whether
+      # that's an org-level secret shared with this repo or a
+      # repo-level one (GitHub merges both into the same `secrets`
+      # context by name, repo-level winning on a name collision --
+      # there's no separate workflow syntax for "org" vs "repo", so
+      # using the org-shared one is just a matter of the org secret
+      # existing and this repo being in its visibility list).
+      #
+      # Written to app/debug.keystore, not android-project/debug.keystore
+      # (this step's own working directory) -- app/build.gradle.kts
+      # resolves DEBUG_KEYSTORE_PATH with Gradle's file(), which is
+      # relative to *that build script's own module directory*
+      # (android-project/app/), not this step's shell cwd. Writing one
+      # level too high here is what made validateSigningDebug fail
+      # with "Keystore file ... not found" even though this step
+      # itself succeeded and HAS_DEBUG_KEYSTORE was true.
       - name: Decode debug keystore (optional)
         if: ${{ env.HAS_DEBUG_KEYSTORE == 'true' }}
-        run: echo "${{ secrets.DEBUG_KEYSTORE_B64 }}" | base64 -d > debug.keystore
+        run: echo "${{ secrets.DEBUG_KEYSTORE_B64 }}" | base64 -d > app/debug.keystore
 
       - name: Assemble debug APK
         env:
@@ -154,12 +167,15 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      # Optional -- only runs if the repo has a RELEASE_KEYSTORE_BASE64
-      # secret configured. Writes the decoded keystore to a
-      # workspace-local file that never leaves this job's runner.
+      # Optional -- only runs if RELEASE_KEYSTORE_BASE64 resolves
+      # (org-level or repo-level secret, same note as the debug job's
+      # decode step above). Written to app/release.keystore for the
+      # same reason as app/debug.keystore there: file() in
+      # app/build.gradle.kts resolves relative to android-project/app/,
+      # not this step's own working directory.
       - name: Decode release keystore (optional)
         if: ${{ env.HAS_RELEASE_KEYSTORE == 'true' }}
-        run: echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+        run: echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
 
       - name: Assemble release APK
         env:
