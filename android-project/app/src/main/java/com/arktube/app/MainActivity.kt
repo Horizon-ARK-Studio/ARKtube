@@ -710,6 +710,22 @@ class MainActivity : AppCompatActivity() {
         // and come out wrong (or not apply at all) after rotating to
         // landscape, or vice versa.
         container.viewTreeObserver.addOnGlobalLayoutListener {
+            // Chromium doesn't necessarily attach the actual
+            // hardware-composited SurfaceView synchronously inside
+            // `video` by the time onShowCustomView() returns -- it's
+            // common for that inner SurfaceView to be added a frame
+            // or more later, once the underlying Surface is actually
+            // created. The one-time neutralizeSurfaceViewZOrder(view)
+            // call in onShowCustomView() walks the tree *before* that
+            // child exists in that case, finds nothing, and never
+            // runs again -- which is exactly how the button/other
+            // overlays could stay unreachable even though the crop
+            // itself (driven by separate width/height fields, not
+            // this tree) still worked. Re-walking on every layout
+            // pass here catches a late-attached SurfaceView as soon
+            // as it shows up instead of only checking once up front.
+            // Idempotent and cheap, so safe to call unconditionally.
+            neutralizeSurfaceViewZOrder(container)
             applyNativeZoomCrop()
         }
         ViewCompat.setOnApplyWindowInsetsListener(container) { _, insets ->
