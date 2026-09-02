@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ARKtube
+Comment=Enter the native ARKtube session (Wayland Display Server)
+Exec=gnome-session --session gnome-kiosk-script
+TryExec=gnome-session
+Type=Application
+DesktopNames=GNOME-Kiosk;GNOME;
+X-GDM-SessionRegisters=true
+X-GDM-CanRunHeadless=true

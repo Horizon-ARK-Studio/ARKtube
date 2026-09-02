@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# gnome-kiosk-script — deployed to ~/.local/bin/gnome-kiosk-script.
+#
+# This is the exact, and only, file the `gnome-kiosk-script-session`
+# package (Ubuntu/GDM) leaves unfilled. Everything else — the GDM gear
+# entry, the gnome-session session file, and the systemd user service
+# that runs this script — is already shipped by that package. See
+# docs/STAGE-1-SELECTABLE-SESSION.md for how that was verified.
+#
+# `/usr/bin/gnome-kiosk-script` (from the package) execs this file with
+# `exec ~/.local/bin/gnome-kiosk-script "$@"` if it exists, instead of
+# writing out its own placeholder example. So this script *is* the
+# kiosk's managed application, from GNOME Kiosk's point of view.
+#
+# `arktube` is the launcher a .deb install of ARKtube puts on PATH
+# (see main's packaging/linux/build-deb.sh) — it already handles
+# NL_PATH, stale-Chrome cleanup, and its own EXIT/INT/TERM trap, so
+# nothing further needs to happen here.
+#
+# No respawn logic here on purpose: the systemd unit that runs this
+# script (org.gnome.Kiosk.Script.service) already has Restart=always,
+# so if ARKtube exits, this script exiting will cause a relaunch loop
+# regardless of what's written here. Taming that loop, and making
+# ARKtube exit actually end the session instead of relaunching it, is
+# Stage 2's job — see the "GNOME Kiosk 46 vs 50" note in
+# docs/STAGE-1-SELECTABLE-SESSION.md.
+
+exec arktube

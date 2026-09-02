@@ -22,6 +22,12 @@ Start there before these docs.
 | [`foundational/`](foundational/README.md) | Why Webtop exists as a separate session layer, not just a fullscreen window |
 | [`bugs-caught/`](bugs-caught/README.md) | Session/kiosk-specific bugs found and fixed — currently empty |
 
+## Stage docs
+
+| Doc | Covers |
+|---|---|
+| [`STAGE-1-SELECTABLE-SESSION.md`](STAGE-1-SELECTABLE-SESSION.md) | Stage 1 implementation record: the exact `gnome-kiosk-script-session` package contents as verified from its `.deb`, the gear-menu naming gap that fix corrects, and the confirmed (not assumed) GNOME Kiosk 46 restart-loop risk carried into Stage 2 |
+
 ## How this relates to `main`
 
 `main` builds ARKtube itself — the Neutralino app that shows YouTube in a
