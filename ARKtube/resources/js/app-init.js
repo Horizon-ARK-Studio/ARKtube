@@ -628,6 +628,83 @@
         }
     }
 
+    // --- Cursor auto-hide (idle) --------------------------------------
+    //
+    // Standardizes cursor-hiding across every session type and platform
+    // ARKtube runs on. Webtop's gnome-kiosk-script (see the `webtop`
+    // branch's docs/STAGE-7-VISIBILITY-AND-CURSOR.md) can only drive
+    // this via unclutter-xfixes, and only on the X11 session at that --
+    // under Wayland the cursor image is drawn by whichever client owns
+    // the surface under the pointer, so a background daemon outside
+    // that client structurally cannot reach in and hide it. Doing this
+    // here instead, inside the webview that *is* that client, covers
+    // Wayland, X11, Windows, and macOS with one implementation, rather
+    // than depending on a session-layer tool that only ever worked on
+    // one of ARKtube's supported sessions.
+    //
+    // 10s matches webtop's own `unclutter-xfixes --timeout 10` /
+    // `unclutter -idle 10`, so the two layers agree on timing even
+    // though only one of them can actually still be doing anything
+    // (webtop's X11-only fallback and this both fire in that case; only
+    // this one does anywhere else).
+    const CURSOR_IDLE_MS = 10000;
+    const CURSOR_HIDDEN_CLASS = "arktube-cursor-hidden";
+    let cursorIdleTimer = null;
+
+    function injectCursorAutoHideStyle() {
+        if (document.getElementById("arktube-cursor-autohide-style")) {
+            return;
+        }
+        const style = document.createElement("style");
+        style.id = "arktube-cursor-autohide-style";
+        style.textContent =
+            `.${CURSOR_HIDDEN_CLASS}, .${CURSOR_HIDDEN_CLASS} * { cursor: none !important; }`;
+        document.head.appendChild(style);
+    }
+
+    function resetCursorIdleTimer() {
+        document.documentElement.classList.remove(CURSOR_HIDDEN_CLASS);
+        if (cursorIdleTimer) {
+            clearTimeout(cursorIdleTimer);
+        }
+        cursorIdleTimer = setTimeout(() => {
+            document.documentElement.classList.add(CURSOR_HIDDEN_CLASS);
+        }, CURSOR_IDLE_MS);
+    }
+
+    function onCursorActivity(e) {
+        // Gamepad/remote input is re-dispatched as synthetic keydown
+        // events (see dispatchSyntheticKey() below) so youtube.com/tv's
+        // own D-pad handling picks it up -- but that isn't cursor
+        // activity, and letting it count would mean a controller-only
+        // session (exactly the TV/kiosk case this app targets) never
+        // actually keeps the cursor hidden. `isTrusted` is false on
+        // events constructed with `new KeyboardEvent(...)`, true on
+        // anything the platform generated from real hardware input, so
+        // it's what distinguishes the two here rather than tracking
+        // "was this dispatch synthetic" by hand at every call site.
+        if (!e.isTrusted) {
+            return;
+        }
+        resetCursorIdleTimer();
+    }
+
+    function initCursorAutoHide() {
+        if (!document.head) {
+            // Defensive: same injectScript timing concern as elsewhere
+            // in this file -- document.head isn't guaranteed to exist
+            // yet when this script first runs.
+            document.addEventListener("DOMContentLoaded", initCursorAutoHide, { once: true });
+            return;
+        }
+        injectCursorAutoHideStyle();
+        window.addEventListener("mousemove", onCursorActivity, true);
+        window.addEventListener("mousedown", onCursorActivity, true);
+        window.addEventListener("wheel", onCursorActivity, true);
+        window.addEventListener("keydown", onCursorActivity, true);
+        resetCursorIdleTimer();
+    }
+
     // Initialize Neutralino with error handling
     try {
         Neutralino.init();
@@ -660,6 +737,7 @@
     initGamepadSupport();
     initFullscreenButton();
     initImmersiveButton();
+    initCursorAutoHide();
 
     // TODO: https://github.com/neutralinojs/neutralinojs/issues/615
     if (NL_OS !== "Darwin") {

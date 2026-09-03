@@ -23,6 +23,7 @@ each platform's package. Start there before these docs.
 | [`SYSTEM-DESIGN-AGREEMENT.md`](SYSTEM-DESIGN-AGREEMENT.md) | The recurring architectural rule behind this project's worst bugs: who is allowed to own what, between this app's native layer and the WebView/Chromium runtime it sits on top of |
 | [`BUGS-CAUGHT.md`](BUGS-CAUGHT.md) | AppImage crash and playback-quality fix record: the `resources.neu`/`.tmp` launch crash, degraded subtitle/video playback from missing GStreamer plugins, and the chrome-mode detached-process cleanup issues that follow from it |
 | [`IMMERSIVE-MODE.md`](IMMERSIVE-MODE.md) | Implementation record for the Immersive Mode button: why F11 no longer has two competing handlers, the ownership split between the untrusted in-page script and the trusted packaging launcher, why real Chrome-side hardening can't apply mid-session, and what's still not done (Windows/macOS launcher parity) |
+| [`CURSOR-AUTO-HIDE.md`](CURSOR-AUTO-HIDE.md) | Implementation record for idle cursor auto-hide in `app-init.js`: why it lives here rather than in `webtop`, how it avoids reacting to gamepad-synthesized key events, and what it does and doesn't replace on the X11 session |
 
 ## Non-goals of this docs tree
 
