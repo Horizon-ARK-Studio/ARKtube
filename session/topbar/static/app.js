@@ -35,6 +35,14 @@ function togglePanel(panel) {
   setPanel(activePanel === panel ? "none" : panel);
 }
 
+// Called from topbar.py's Stage 7 visibility watcher, right before it
+// hides the window, so a panel left open never resumes open the next
+// time the bar is shown (e.g. after Immersive Mode is turned back off).
+// Not exposed through pywebview.api because this direction of the call
+// is Python -> JS (evaluate_js), not JS -> Python -- see
+// docs/STAGE-7-VISIBILITY-AND-CURSOR.md.
+window.__arktubeTopbarCollapse = () => setPanel("none");
+
 $("clock-pill").addEventListener("click", () => togglePanel("calendar"));
 $("wifi-btn").addEventListener("click", () => togglePanel("quicksettings"));
 $("volume-btn").addEventListener("click", () => togglePanel("quicksettings"));

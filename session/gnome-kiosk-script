@@ -41,4 +41,21 @@ if [ -x "${HOME}/.local/share/arktube-topbar/topbar.py" ]; then
     python3 "${HOME}/.local/share/arktube-topbar/topbar.py" &
 fi
 
+# Stage 7 (see docs/STAGE-7-VISIBILITY-AND-CURSOR.md): hide the mouse
+# pointer after 10s of no motion/click, same launch-point-and-cgroup
+# reasoning as the topbar above — one more thing forked in before `exec`
+# so it rides the same KillMode=control-group cleanup instead of a third
+# lifecycle. `--timeout`/`-idle` is seconds of inactivity before the
+# cursor is hidden; any motion or click restores it immediately, both
+# tools' own default behavior. Guarded by `command -v` the same way the
+# topbar check above guards on `-x`, so a machine that hasn't re-run
+# this branch's install script since Stage 7 landed still starts
+# ARKtube instead of failing on a missing binary.
+if command -v unclutter-xfixes >/dev/null 2>&1; then
+    unclutter-xfixes --timeout 10 &
+elif command -v unclutter >/dev/null 2>&1; then
+    # Older/alternate package name on some distros; same CLI shape.
+    unclutter -idle 10 -root &
+fi
+
 exec arktube

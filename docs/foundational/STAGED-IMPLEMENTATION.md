@@ -171,6 +171,41 @@ otherwise offline.
 
 ---
 
+## Stage 7 — Topbar visibility (Immersive Mode / offline) and cursor auto-hide
+
+**Question:** Now that Stage 6 put session controls inside the ARKtube
+session, does the topbar stay out of the way of `main`'s Immersive Mode
+without ever becoming genuinely unreachable — and does an idle mouse
+pointer stop sitting on top of the video the way any kiosk/TV deployment
+would expect?
+
+This stage also wasn't in the original plan; it was added once `main`
+shipped Immersive Mode (see `docs/bugs-caught/IMMERSIVE-MODE.md` on the
+`main` branch) and it became clear Stage 6's always-visible bar and that
+feature's "lock the session down" intent were in direct tension, with no
+existing mechanism to resolve it.
+
+Steps:
+
+* Hide the topbar only while `main`'s persisted Immersive Mode flag is
+  on *and* the machine has confirmed connectivity — read both, locally,
+  the same way every Stage 6 control already reads local system state.
+* Reveal the topbar again the instant either condition stops being
+  true, so "no network" or "Immersive Mode off" is never left stranded
+  behind a hidden bar — this is the part of Stage 6's own "must work
+  offline" requirement that a hidden bar would otherwise quietly break.
+* Auto-hide the system mouse pointer after 10 seconds of inactivity,
+  system-wide, using the same launch-and-cgroup pattern the topbar
+  itself already established in Stage 6.
+
+**Exit condition:** With Immersive Mode off, or the machine online, the
+topbar is reachable. With Immersive Mode on and the machine confirmed
+online, the topbar is hidden. The mouse pointer hides itself after 10s
+idle on the X11 session; the Wayland-only gap in that last part is
+stated, not hidden — see `docs/STAGE-7-VISIBILITY-AND-CURSOR.md`.
+
+---
+
 ## Non-goals of this staging
 
 This staging does not include:

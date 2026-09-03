@@ -81,6 +81,15 @@ install -Dm644 "${HERE}/topbar/static/index.html" "${HOME}/.local/share/arktube-
 install -Dm644 "${HERE}/topbar/static/style.css" "${HOME}/.local/share/arktube-topbar/static/style.css"
 install -Dm644 "${HERE}/topbar/static/app.js" "${HOME}/.local/share/arktube-topbar/static/app.js"
 
+# Stage 7 (see docs/STAGE-7-VISIBILITY-AND-CURSOR.md): auto-hide the
+# mouse pointer after 10s idle, and let the topbar auto-reveal itself
+# when main's Immersive Mode is off or the machine is offline. The
+# X11-Xfixes cursor-hider is the only new system dependency this stage
+# adds; the visibility half is pure logic already deployed above as
+# part of topbar.py, nothing extra to install for it.
+echo "==> Installing the cursor auto-hide tool"
+sudo apt-get install -y unclutter-xfixes
+
 cat <<'EOF'
 
 ==> Done.
@@ -109,4 +118,12 @@ A system topbar now starts alongside ARKtube (clock, Wi-Fi, volume,
 brightness, battery, lock, and power), reachable without a network
 connection. See docs/STAGE-6-OFFLINE-TOPBAR.md for what backs each
 control and what's still open.
+
+The topbar now also hides itself while ARKtube's own Immersive Mode is
+on and the machine is online, and auto-reveals itself the instant
+either stops being true (Immersive Mode turned off, or connectivity
+drops) -- so it's never actually out of reach. The mouse pointer hides
+itself after 10s of no movement or clicks, system-wide. See
+docs/STAGE-7-VISIBILITY-AND-CURSOR.md for both, and their current
+X11-only caveat on a pure-Wayland session.
 EOF
