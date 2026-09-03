@@ -192,9 +192,17 @@ way every prior stage in this branch has:
   Wayland means the cursor-hide happening inside ARKtube's own webview
   (e.g. CSS `cursor: none` after idle, driven by `app-init.js`), which
   is `main`'s responsibility per the root README's ARKtube/Webtop
-  split, not something addressable from this session layer. Flagged
-  here as an open item for `main`, rather than left as something this
-  stage silently only half-does.
+  split, not something addressable from this session layer.
+
+  **Update:** done on `main` — see that branch's
+  `docs/CURSOR-AUTO-HIDE.md`. `app-init.js` now hides its own cursor
+  after 10s idle (matching this stage's own timeout) from inside the
+  webview itself, which works on every session type ARKtube runs
+  under, Wayland included. This stage's X11-gated `unclutter-xfixes`
+  fork is no longer the only thing covering the X11 session either way
+  — it's redundant-but-harmless there now, kept as-is rather than
+  removed, since ripping out a working, gated, cheap fallback isn't
+  worth doing just because `main` now covers the same ground.
 * **`nmcli`-less machines** — a machine with NetworkManager fully absent
   (not just Wi-Fi off) falls back to "not online" per this stage's own
   fail-open rule, which means the bar stays permanently visible there.
