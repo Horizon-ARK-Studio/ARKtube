@@ -61,6 +61,26 @@ install -Dm644 \
     "${HOME}/.config/systemd/user/org.gnome.Kiosk.Script.service.d/override.conf"
 systemctl --user daemon-reload 2>/dev/null || true
 
+# Stage 6 (see docs/STAGE-6-OFFLINE-TOPBAR.md): the offline system topbar.
+# pywebview's GTK backend needs PyGObject and WebKit2GTK from apt — pip
+# alone can't provide those. The tray/control CLI tools it shells out to
+# (nmcli, wpctl, brightnessctl, upower) are each optional at runtime —
+# see topbar.py's `run()` — but are installed here too so the common case
+# works out of the box rather than silently degrading on a fresh Noble
+# install.
+echo "==> Installing the offline topbar's system dependencies"
+sudo apt-get install -y \
+    python3-pip python3-gi gir1.2-webkit2-4.1 \
+    network-manager wireplumber pulseaudio-utils brightnessctl upower
+pip install --user --break-system-packages -r "${HERE}/topbar/requirements.txt"
+
+echo "==> Deploying the offline topbar"
+mkdir -p "${HOME}/.local/share/arktube-topbar/static"
+install -Dm755 "${HERE}/topbar/topbar.py" "${HOME}/.local/share/arktube-topbar/topbar.py"
+install -Dm644 "${HERE}/topbar/static/index.html" "${HOME}/.local/share/arktube-topbar/static/index.html"
+install -Dm644 "${HERE}/topbar/static/style.css" "${HOME}/.local/share/arktube-topbar/static/style.css"
+install -Dm644 "${HERE}/topbar/static/app.js" "${HOME}/.local/share/arktube-topbar/static/app.js"
+
 cat <<'EOF'
 
 ==> Done.
@@ -84,4 +104,9 @@ Not yet verified end to end in this environment (no display manager
 here to click through) — see docs/STAGE-1-SELECTABLE-SESSION.md,
 docs/STAGE-2-SESSION-LIFECYCLE.md, and docs/STAGE-3-INPUT-MAPPING.md for
 exactly what has and hasn't been confirmed.
+
+A system topbar now starts alongside ARKtube (clock, Wi-Fi, volume,
+brightness, battery, lock, and power), reachable without a network
+connection. See docs/STAGE-6-OFFLINE-TOPBAR.md for what backs each
+control and what's still open.
 EOF

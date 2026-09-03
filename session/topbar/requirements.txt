@@ -1,0 +1,7 @@
+# session/topbar — Python dependencies.
+#
+# pywebview's GTK backend (used here, to match the GTK/WebKitGTK stack
+# GNOME Kiosk itself is built on) additionally needs system packages that
+# pip can't provide — see session/install-webtop-session.sh, which installs
+# python3-gi and gir1.2-webkit2-4.1 before this is installed.
+pywebview>=5.0

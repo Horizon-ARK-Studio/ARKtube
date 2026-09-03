@@ -136,6 +136,41 @@ undocumented manual steps.
 
 ---
 
+## Stage 6 — Offline system topbar
+
+**Question:** Can a user reach basic system controls — volume,
+brightness, Wi-Fi, lock, logout, power — from inside the ARKtube session,
+without a network connection and without falling back to the full GNOME
+Shell desktop this branch exists to avoid?
+
+This stage wasn't in the original plan above; it was added once Stages
+1–4 made clear that GNOME Kiosk's own minimalism (no panel, no dock, no
+status bar — see `docs/foundational/PROBLEM-STATEMENT.md`) leaves a real
+gap the root README's own "session controls" and "allow the session to
+be locked" / "allow the user to log out" bullets already promise, but
+that nothing built so far actually provides *from inside* the session.
+
+Steps:
+
+* Build a small always-on-top strip, modeled on GNOME Shell's own top
+  bar and its quick-settings/calendar popovers, using pywebview so the
+  UI is plain HTML/CSS/JS but the controls themselves shell out to local
+  system tools.
+* Every control must resolve without a network round-trip — this is the
+  hard requirement, not a nice-to-have. Wi-Fi toggling, volume,
+  brightness, lock, logout, and power all go through local CLI
+  tools/logind, never anything that assumes connectivity.
+* Launch it so it shares the existing session's lifecycle rather than
+  inventing a second one — see how it hooks into
+  `org.gnome.Kiosk.Script.service`'s own cgroup below.
+
+**Exit condition:** A user can open the topbar, see accurate live status
+(clock, battery, volume, Wi-Fi), and use lock/logout/power/volume/
+brightness/Wi-Fi controls, with the machine's Wi-Fi off or the machine
+otherwise offline.
+
+---
+
 ## Non-goals of this staging
 
 This staging does not include:
