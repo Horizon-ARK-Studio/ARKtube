@@ -27,6 +27,7 @@ Start there before these docs.
 | Doc | Covers |
 |---|---|
 | [`STAGE-1-SELECTABLE-SESSION.md`](STAGE-1-SELECTABLE-SESSION.md) | Stage 1 implementation record: the exact `gnome-kiosk-script-session` package contents as verified from its `.deb`, the gear-menu naming gap that fix corrects, and the confirmed (not assumed) GNOME Kiosk 46 restart-loop risk carried into Stage 2 |
+| [`STAGE-2-SESSION-LIFECYCLE.md`](STAGE-2-SESSION-LIFECYCLE.md) | Stage 2 implementation record: the restart-loop and logout-hang fixes, confirmed against the actual shipped systemd units and `.desktop` files and against upstream's own fixes for both in GNOME Kiosk 50; and why locking is a real, currently-unimplemented platform gap rather than an oversight |
 
 ## How this relates to `main`
 

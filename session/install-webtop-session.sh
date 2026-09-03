@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 #
-# install-webtop-session.sh — Stage 1: make ARKtube selectable from GDM's
-# gear icon and land in it end to end.
+# install-webtop-session.sh — Stage 1 (selectable session) + Stage 2
+# (session lifecycle): make ARKtube selectable from GDM's gear icon, land
+# in it end to end, and make sure exiting it ends the session instead of
+# relaunching it forever. See docs/STAGE-1-SELECTABLE-SESSION.md and
+# docs/STAGE-2-SESSION-LIFECYCLE.md for what each part below is fixing
+# and how it was verified.
 #
 # Requires: ARKtube already installed as a .deb (so `arktube` is on
 # PATH — see main's packaging/linux/build-deb.sh). This script does not
@@ -41,6 +45,22 @@ sudo install -Dm644 "${HERE}/xsessions/arktube.desktop" \
 echo "==> Deploying ARKtube's gnome-kiosk-script"
 install -Dm755 "${HERE}/gnome-kiosk-script" "${HOME}/.local/bin/gnome-kiosk-script"
 
+# org.gnome.Kiosk.Script.service (owned by gnome-kiosk-script-session) ships
+# Restart=always with no RestartSec override. On Noble's gnome-kiosk 46,
+# that turns ARKtube exiting — a crash, or a deliberate quit — into an
+# unremovable relaunch loop instead of ending the session and returning to
+# GDM. GNOME Kiosk 50 fixed this upstream ("Do not restart the script
+# session on exit (allows logout)"); this drop-in reproduces that fix for
+# Noble without touching the package's own unit file. See
+# docs/STAGE-2-SESSION-LIFECYCLE.md for how this was confirmed against the
+# actual shipped unit file.
+echo "==> Overriding org.gnome.Kiosk.Script.service's Restart=always"
+mkdir -p "${HOME}/.config/systemd/user/org.gnome.Kiosk.Script.service.d"
+install -Dm644 \
+    "${HERE}/systemd/org.gnome.Kiosk.Script.service.d/override.conf" \
+    "${HOME}/.config/systemd/user/org.gnome.Kiosk.Script.service.d/override.conf"
+systemctl --user daemon-reload 2>/dev/null || true
+
 cat <<'EOF'
 
 ==> Done.
@@ -49,7 +69,14 @@ Log out, click the gear icon on the GDM login screen, and select
 "ARKtube". Authenticating from there should land in ARKtube fullscreen
 with no manual steps — that's Stage 1's exit condition.
 
+Exiting ARKtube (crash or deliberate quit) should now end the session and
+return to the GDM login screen instead of relaunching ARKtube in a loop —
+that's Stage 2's exit condition for the "ARKtube exits on its own" case.
+Locking is not yet wired — see docs/STAGE-2-SESSION-LIFECYCLE.md for why
+that one is still open.
+
 Not yet verified end to end in this environment (no display manager
-here to click through) — see docs/STAGE-1-SELECTABLE-SESSION.md for
-exactly what has and hasn't been confirmed.
+here to click through) — see docs/STAGE-1-SELECTABLE-SESSION.md and
+docs/STAGE-2-SESSION-LIFECYCLE.md for exactly what has and hasn't been
+confirmed.
 EOF
