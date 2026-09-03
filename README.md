@@ -62,6 +62,8 @@ GNOME Kiosk is designed for fixed-purpose and single-application deployments and
 
 For current GNOME Kiosk releases, native compositor keybindings are disabled by default as part of kiosk hardening. VT switching must be explicitly re-enabled with `--enable-vt-switch`. Webtop should therefore treat the kiosk compositor as the first layer of session policy rather than attempting to solve everything from application JavaScript.
 
+> This describes GNOME Kiosk 50 and later. Ubuntu 24.04 Noble — the version this branch actually targets and installs — ships `46.0-1build2`, which predates this flag entirely (confirmed directly against the installed binary's `--help-all` output; no `vt-switch` option exists in it). It also predates the compositor's VT-switch neutering that flag would restore. Practically this is moot for ARKtube's own key set either way — see `docs/STAGE-3-INPUT-MAPPING.md` for what was actually checked on the shipped version.
+
 ## Responsibilities
 
 ### Ubuntu / GDM
@@ -180,6 +182,8 @@ Start ARKtube
 Logging out should terminate the ARKtube session cleanly and return control to the display manager.
 
 The session should not restart itself merely because ARKtube exited. GNOME Kiosk 50 specifically changed its script-session behavior so that a user can log out when the script terminates.
+
+> Noble's `gnome-kiosk-script-session` (`46.0-1build2`) predates that upstream fix and ships `Restart=always` with no `RestartSec` override, which turns ARKtube exiting into an unremovable relaunch loop instead of a clean logout. This branch's `session/systemd/org.gnome.Kiosk.Script.service.d/override.conf` reproduces the GNOME Kiosk 50 behavior as a drop-in rather than waiting on a package update — see `docs/STAGE-2-SESSION-LIFECYCLE.md`.
 
 ## Design principles
 
