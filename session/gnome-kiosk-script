@@ -51,11 +51,39 @@ fi
 # topbar check above guards on `-x`, so a machine that hasn't re-run
 # this branch's install script since Stage 7 landed still starts
 # ARKtube instead of failing on a missing binary.
-if command -v unclutter-xfixes >/dev/null 2>&1; then
-    unclutter-xfixes --timeout 10 &
-elif command -v unclutter >/dev/null 2>&1; then
-    # Older/alternate package name on some distros; same CLI shape.
-    unclutter -idle 10 -root &
+#
+# X11-only, and gated on that rather than just "installed": both tools
+# work by talking to the X server's XFixes extension, and this script
+# runs unchanged under both wayland-sessions/arktube.desktop (the
+# primary path) and xsessions/arktube.desktop (the secondary Xorg one —
+# see the root README's "Session model"). On the Wayland session there
+# is no system X server for them to attach to, so starting either here
+# unconditionally previously just forked a process that sat there doing
+# nothing on the session this branch actually targets. `$XDG_SESSION_TYPE`
+# is set by GDM/gnome-session before this script runs, so it's checked
+# here rather than guessed at from which desktop entry might have been
+# selected.
+#
+# There is no Wayland-side equivalent to fall back to yet: GNOME Kiosk's
+# own compositor-level `--no-cursor` flag was only added in version 50,
+# and this branch targets Ubuntu 24.04 Noble's shipped 46.0-1build2 (see
+# the root README's "Session model" section for why, and how that was
+# confirmed against the installed binary). Even on a newer GNOME Kiosk
+# this would need to be a compositor launch flag, not a background
+# daemon like this one — under Wayland the cursor image is drawn by
+# whichever client owns the surface under the pointer, so a bystander
+# process structurally cannot reach in and hide another app's cursor.
+# A real fix on Wayland means ARKtube's own webview hiding its cursor
+# after idle (CSS `cursor: none`, driven by `app-init.js`), which is
+# `main`'s responsibility per this repo's ARKtube/Webtop split, not
+# something this session layer can do on its behalf.
+if [ "${XDG_SESSION_TYPE:-}" = "x11" ]; then
+    if command -v unclutter-xfixes >/dev/null 2>&1; then
+        unclutter-xfixes --timeout 10 &
+    elif command -v unclutter >/dev/null 2>&1; then
+        # Older/alternate package name on some distros; same CLI shape.
+        unclutter -idle 10 -root &
+    fi
 fi
 
 exec arktube

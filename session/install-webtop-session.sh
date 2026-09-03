@@ -82,12 +82,15 @@ install -Dm644 "${HERE}/topbar/static/style.css" "${HOME}/.local/share/arktube-t
 install -Dm644 "${HERE}/topbar/static/app.js" "${HOME}/.local/share/arktube-topbar/static/app.js"
 
 # Stage 7 (see docs/STAGE-7-VISIBILITY-AND-CURSOR.md): auto-hide the
-# mouse pointer after 10s idle, and let the topbar auto-reveal itself
-# when main's Immersive Mode is off or the machine is offline. The
-# X11-Xfixes cursor-hider is the only new system dependency this stage
-# adds; the visibility half is pure logic already deployed above as
+# mouse pointer after 10s idle on the xsessions/arktube.desktop (X11)
+# entry only — gnome-kiosk-script now gates its use on
+# $XDG_SESSION_TYPE, since it's an X11-Xfixes tool with nothing to
+# attach to under the primary wayland-sessions/arktube.desktop entry.
+# Installed unconditionally here regardless of which entry gets
+# selected at the login screen, same as the topbar's own dependencies
+# above; the visibility half is pure logic already deployed above as
 # part of topbar.py, nothing extra to install for it.
-echo "==> Installing the cursor auto-hide tool"
+echo "==> Installing the cursor auto-hide tool (used on the X11 session only)"
 sudo apt-get install -y unclutter-xfixes
 
 cat <<'EOF'
@@ -122,8 +125,10 @@ control and what's still open.
 The topbar now also hides itself while ARKtube's own Immersive Mode is
 on and the machine is online, and auto-reveals itself the instant
 either stops being true (Immersive Mode turned off, or connectivity
-drops) -- so it's never actually out of reach. The mouse pointer hides
-itself after 10s of no movement or clicks, system-wide. See
-docs/STAGE-7-VISIBILITY-AND-CURSOR.md for both, and their current
-X11-only caveat on a pure-Wayland session.
+drops) -- so it's never actually out of reach. On the X11 session
+(xsessions/arktube.desktop) the mouse pointer also hides itself after
+10s of no movement or clicks; on the primary Wayland session this is
+not yet possible from Webtop at all -- see
+docs/STAGE-7-VISIBILITY-AND-CURSOR.md for why, and what fixing it for
+real would require.
 EOF

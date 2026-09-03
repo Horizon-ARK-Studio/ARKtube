@@ -87,7 +87,7 @@ Every step of this — reading a file, running `nmcli`, resizing/hiding a
 of its own; the one thing that *reads* network state was already being
 read the same way for the Wi-Fi tile before this stage existed.
 
-### 2. System-wide cursor auto-hide
+### 2. Cursor auto-hide, on the X11 session only
 
 `session/gnome-kiosk-script` now also forks `unclutter-xfixes --timeout
 10` (falling back to the older `unclutter -idle 10 -root` if only that
@@ -97,10 +97,19 @@ topbar itself already uses: forked *before* the `exec` replaces this
 script's process image, it lands in `org.gnome.Kiosk.Script.service`'s
 own cgroup, so Stage 4's `KillMode=control-group` reaps it on logout
 along with everything else, with no third lifecycle to maintain.
-`unclutter-xfixes` uses the X11-Xfixes extension rather than the
-original `unclutter`'s fake-window/pointer-grab approach, which is the
-more compatible choice against a real window manager/compositor — see
-"What was not verified" for what this means on a Wayland-only session.
+
+This is now gated on `[ "${XDG_SESSION_TYPE:-}" = x11 ]`. It wasn't in
+the version first landed on this branch, which forked the same command
+unconditionally under both `wayland-sessions/arktube.desktop` (the
+primary path) and `xsessions/arktube.desktop` (the secondary Xorg one).
+`unclutter`/`unclutter-xfixes` both work by talking to the X server's
+XFixes extension; on the Wayland session there is no system-wide X
+server for them to attach to, so the unconditional version mostly just
+forked a process that sat there doing nothing on the session this
+branch is actually built for — a real bug, not a documented gap, since
+the code claimed to do something it structurally couldn't. See "What
+was not verified" for the rest of the story, and why there isn't yet a
+Wayland-side equivalent to gate it toward instead.
 
 ### Installer changes
 
@@ -160,14 +169,32 @@ way every prior stage in this branch has:
   container, the same limitation every stage above has carried.
 * **Wayland compositors** — `unclutter-xfixes` is an X11/XFixes tool.
   On the `xsessions/arktube.desktop` entry (Xorg) this should work as
-  documented; on `wayland-sessions/arktube.desktop`, GNOME Kiosk's
-  Mutter-based Wayland compositor does not expose the same X cursor to
-  hide, and `unclutter-xfixes` would only affect XWayland client
-  surfaces, not the compositor-owned Wayland pointer. This stage does
-  not attempt a Wayland-native fix (e.g. driving Mutter/GNOME Kiosk's
-  own idle-cursor behavior directly, if any exists) — flagged as an
-  open item rather than silently only working on half the branch's own
-  supported session types.
+  documented; on `wayland-sessions/arktube.desktop` there is no
+  system-wide X server for it to attach to at all, so it's now gated
+  off on that session via `$XDG_SESSION_TYPE` rather than started and
+  left doing nothing.
+
+  There also isn't a compositor-level fix to gate it toward instead,
+  at least not on the GNOME Kiosk this branch targets: `--no-cursor`,
+  the flag that would drive Mutter/GNOME Kiosk's own idle-cursor
+  behavior directly, was only added in GNOME Kiosk 50. Ubuntu 24.04
+  Noble ships `46.0-1build2` (see the root README's "Session model"
+  section — the same version gap already documented there for
+  `--enable-vt-switch`), which predates that flag entirely.
+
+  The deeper reason this can't just be worked around with another
+  background daemon, on 46 or 50: under Wayland the cursor image is
+  drawn by whichever client currently owns the surface under the
+  pointer, not by a bystander process watching for idle input. A
+  background daemon structurally cannot reach in and hide another
+  app's cursor — that's Wayland's client-isolation model working as
+  intended, not a gap in `unclutter-xfixes` specifically. A real fix on
+  Wayland means the cursor-hide happening inside ARKtube's own webview
+  (e.g. CSS `cursor: none` after idle, driven by `app-init.js`), which
+  is `main`'s responsibility per the root README's ARKtube/Webtop
+  split, not something addressable from this session layer. Flagged
+  here as an open item for `main`, rather than left as something this
+  stage silently only half-does.
 * **`nmcli`-less machines** — a machine with NetworkManager fully absent
   (not just Wi-Fi off) falls back to "not online" per this stage's own
   fail-open rule, which means the bar stays permanently visible there.
@@ -185,8 +212,11 @@ way every prior stage in this branch has:
   met at the code level, with the same on-hardware caveat as everything
   else in this branch.
 * Mouse pointer hidden after 10s idle: met on X11
-  (`xsessions/arktube.desktop`); explicitly **not** met on the
-  Wayland session, called out above rather than claimed.
+  (`xsessions/arktube.desktop`); explicitly **not** met on the primary
+  Wayland session (`wayland-sessions/arktube.desktop`) — now gated off
+  there rather than started and doing nothing, and not fixable from
+  this branch alone since it needs an `main`-side change (see "What
+  was not verified" above).
 
 ## Files
 
@@ -197,9 +227,11 @@ way every prior stage in this branch has:
 * `session/topbar/static/app.js` — `window.__arktubeTopbarCollapse`
   hook added for the watcher's `evaluate_js()` call.
 * `session/gnome-kiosk-script` — forks `unclutter-xfixes`
-  (or `unclutter`) before `exec arktube`.
+  (or `unclutter`) before `exec arktube`, gated on
+  `$XDG_SESSION_TYPE = x11`.
 * `session/install-webtop-session.sh` — installs `unclutter-xfixes`;
-  summary output at the end mentions both new behaviors.
+  summary output at the end mentions both new behaviors and their
+  X11-only scope for the cursor half.
 * `docs/STAGE-7-VISIBILITY-AND-CURSOR.md` — this file.
 * `docs/README.md` — added a row for this stage.
 * `docs/foundational/STAGED-IMPLEMENTATION.md` — added Stage 7's
