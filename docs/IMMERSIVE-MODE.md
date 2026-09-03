@@ -1,10 +1,10 @@
 # Immersive Mode
 
 **Status:** implemented (Linux: `.deb` and AppImage packaging).
-**Scope:** `resources/js/app-init.js`, `neutralino.config.json`,
-`packaging/linux/build-deb.sh`, `packaging/linux/AppRun`.
-**Not yet done:** `packaging/windows/Launch-ARKtube.ps1` and
-`packaging/macos/build-dmg.sh` need the equivalent read-the-flag-and-pick-
+**Scope:** `ARKtube/resources/js/app-init.js`, `ARKtube/neutralino.config.json`,
+`ARKtube/packaging/linux/build-deb.sh`, `ARKtube/packaging/linux/AppRun`.
+**Not yet done:** `ARKtube/packaging/windows/Launch-ARKtube.ps1` and
+`ARKtube/packaging/macos/build-dmg.sh` need the equivalent read-the-flag-and-pick-
 args logic added — see "What's not done yet" below. Flagging this rather
 than quietly limiting scope, same reasoning `docs/STAGE-4-HARDENING.md`
 (webtop branch) uses for its own open items.
@@ -14,7 +14,7 @@ than quietly limiting scope, same reasoning `docs/STAGE-4-HARDENING.md`
 Two things existed before this change, both with legitimate claims to
 `F11`:
 
-1. Chrome mode (`defaultMode: "chrome"` in `neutralino.config.json`) spawns
+1. Chrome mode (`defaultMode: "chrome"` in `ARKtube/neutralino.config.json`) spawns
    a real, separate Chrome/Chromium process (`chrome.cpp`), which already
    has its own native, built-in `F11` fullscreen toggle.
 2. `app-init.js`'s own `onKeyDown` *also* called `toggleFullScreen()` on
@@ -106,8 +106,8 @@ Instead, the split is:
   already implements (`applyConfigOverride`, `"Priority: mode -> root ->
   null"` — a CLI override always wins over the embedded config value).
   This is the layer that can actually enforce something: when the
-  persisted flag is `"1"`, both `packaging/linux/build-deb.sh`'s installed
-  launcher and `packaging/linux/AppRun` now pass
+  persisted flag is `"1"`, both `ARKtube/packaging/linux/build-deb.sh`'s installed
+  launcher and `ARKtube/packaging/linux/AppRun` now pass
   `--chrome-args="<user-agent> --kiosk --disable-dev-tools --disable-pinch --overscroll-history-navigation=0"`
   instead of the baseline args — `--kiosk` removes whatever chrome UI
   `--app=` mode still leaves reachable and forces fullscreen at the
@@ -121,21 +121,21 @@ primitives.
 
 ## Files changed
 
-* `resources/js/app-init.js` — F11 no longer intercepted; new Immersive
+* `ARKtube/resources/js/app-init.js` — F11 no longer intercepted; new Immersive
   Mode button, persistence, and same-session guards.
-* `neutralino.config.json` — added `storage.getData` / `storage.setData`
+* `ARKtube/neutralino.config.json` — added `storage.getData` / `storage.setData`
   to both the root `nativeAllowList` and `modes.chrome.nativeAllowList`
   (chrome mode's own list fully replaces the root list per
   `settings.cpp`'s `getOptionForCurrentMode` — "mode -> root -> null" —
   so it needed adding in both places, not just one).
-* `packaging/linux/build-deb.sh` — the installed `/usr/bin/arktube`
+* `ARKtube/packaging/linux/build-deb.sh` — the installed `/usr/bin/arktube`
   launcher now reads the persisted preference and picks `--chrome-args`
   accordingly.
-* `packaging/linux/AppRun` — same logic, for the AppImage entry point.
+* `ARKtube/packaging/linux/AppRun` — same logic, for the AppImage entry point.
 
 ## What's not done yet
 
-* `packaging/windows/Launch-ARKtube.ps1` and `packaging/macos/build-dmg.sh`
+* `ARKtube/packaging/windows/Launch-ARKtube.ps1` and `ARKtube/packaging/macos/build-dmg.sh`
   don't yet read the persisted flag or pass an equivalent
   `--chrome-args` override. The button and persistence already work
   identically on those platforms (`Neutralino.storage` isn't
