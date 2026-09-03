@@ -75,8 +75,13 @@ that's Stage 2's exit condition for the "ARKtube exits on its own" case.
 Locking is not yet wired — see docs/STAGE-2-SESSION-LIFECYCLE.md for why
 that one is still open.
 
+Arrow keys, Enter, Escape, Home, and F11 (ARKtube's own keyboard/gamepad
+input set) are not grabbed by anything GNOME Kiosk or its dependencies
+bind by default, so no extra input configuration is installed here — see
+docs/STAGE-3-INPUT-MAPPING.md for how that was confirmed.
+
 Not yet verified end to end in this environment (no display manager
-here to click through) — see docs/STAGE-1-SELECTABLE-SESSION.md and
-docs/STAGE-2-SESSION-LIFECYCLE.md for exactly what has and hasn't been
-confirmed.
+here to click through) — see docs/STAGE-1-SELECTABLE-SESSION.md,
+docs/STAGE-2-SESSION-LIFECYCLE.md, and docs/STAGE-3-INPUT-MAPPING.md for
+exactly what has and hasn't been confirmed.
 EOF
