@@ -109,6 +109,23 @@ reap_stale_chrome
 # doesn't inherit the problem.
 trap reap_stale_chrome EXIT INT TERM
 
+# --- Immersive Mode: real Chrome-side hardening -------------------------
+# Mirrors packaging/linux/build-deb.sh's launcher -- see the comment
+# there for the full explanation of why this decision has to be made
+# here (a trusted, local script) rather than in resources/js/app-init.js
+# (an injected script running on youtube.com/tv's own, untrusted origin).
+# In short: app-init.js's Immersive Mode button persists its on/off state
+# via Neutralino.storage, a plain file at
+# ${ARKTUBE_DATA_DIR}/.storage/<key>.neustorage; this script reads that
+# same file directly and picks the real Chrome flags for this launch.
+IMMERSIVE_FLAG_FILE="${ARKTUBE_DATA_DIR}/.storage/immersiveMode.neustorage"
+BASE_CHROME_USER_AGENT='--user-agent="Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;"'
+
+EXTRA_ARGS=()
+if [ -f "${IMMERSIVE_FLAG_FILE}" ] && [ "$(cat "${IMMERSIVE_FLAG_FILE}" 2>/dev/null)" = "1" ]; then
+    EXTRA_ARGS+=(--chrome-args="${BASE_CHROME_USER_AGENT} --kiosk --disable-dev-tools --disable-pinch --overscroll-history-navigation=0")
+fi
+
 # --- Close-button lifecycle coupling -------------------------------------
 # The fix above (and its Windows/macOS equivalents) only ever reaps a
 # stale Chrome process left behind by an unclean *Neutralino server* exit.
@@ -122,7 +139,7 @@ trap reap_stale_chrome EXIT INT TERM
 # and watch for Chrome's own process (matched the same way reap_stale_chrome
 # already does) alongside it, so this app exits as one unit regardless of
 # which side is closed first.
-"${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "$@" &
+"${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "${EXTRA_ARGS[@]}" "$@" &
 NEUTRALINO_PID=$!
 
 # Give chrome.cpp's init() a moment to actually spawn the browser before

@@ -97,7 +97,41 @@ reap_stale_chrome() {
 reap_stale_chrome
 trap reap_stale_chrome EXIT INT TERM
 
-/usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "$@"
+# --- Immersive Mode: real Chrome-side hardening -------------------------
+# resources/js/app-init.js's on-screen Immersive Mode button persists its
+# on/off state via Neutralino.storage, which is just a plain file at
+# ${ARKTUBE_DATA_DIR}/.storage/<key>.neustorage (see api/storage/storage.cpp
+# upstream) -- not shell-executed, not youtube.com's own localStorage.
+# That button's script runs inside the Chrome child, on youtube.com/tv's
+# own origin, a page this app doesn't control, so it is deliberately NOT
+# allowlisted to relaunch itself with new Chrome flags (that would mean
+# giving that untrusted page's own script exec capability -- see
+# neutralino.config.json's nativeAllowList, which stays narrow on
+# purpose). This launcher is the trusted side of that split instead: it
+# reads the same persisted file directly, off disk, and decides on
+# ARKtube's behalf which --chrome-args Neutralino should hand to Chrome
+# for *this* launch. Real hardening can only take effect at Chrome's own
+# process start (see chrome.cpp, which bakes `args` into the command line
+# it spawns once and never revisits) -- not mid-session, which is exactly
+# why this lives here and not in app-init.js.
+IMMERSIVE_FLAG_FILE="${ARKTUBE_DATA_DIR}/.storage/immersiveMode.neustorage"
+BASE_CHROME_USER_AGENT='--user-agent="Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;"'
+
+EXTRA_ARGS=()
+if [ -f "${IMMERSIVE_FLAG_FILE}" ] && [ "$(cat "${IMMERSIVE_FLAG_FILE}" 2>/dev/null)" = "1" ]; then
+    # --kiosk drops whatever chrome UI --app= mode still leaves reachable
+    # (window controls, menu entry points) and forces fullscreen at the
+    # browser level itself -- stronger than the DOM/Neutralino fullscreen
+    # call app-init.js also makes, which only asks the page for
+    # fullscreen and can't touch devtools either way. --disable-dev-tools
+    # is the actual flag that closes off F12 / Ctrl+Shift+I / right-click
+    # Inspect / chrome://inspect; the in-page keydown/contextmenu guards
+    # in app-init.js are a same-session stand-in for the gap between
+    # "button clicked" and "next relaunch", not a substitute for this.
+    EXTRA_ARGS+=(--chrome-args="${BASE_CHROME_USER_AGENT} --kiosk --disable-dev-tools --disable-pinch --overscroll-history-navigation=0")
+fi
+
+/usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "${EXTRA_ARGS[@]}" "$@"
 LAUNCHER
 chmod 755 "${PKGROOT}/usr/bin/arktube"
 

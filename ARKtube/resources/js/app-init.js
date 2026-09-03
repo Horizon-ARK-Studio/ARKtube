@@ -92,9 +92,12 @@
     // neutralino.config.json) rather than auto-entering true fullscreen, so
     // the taskbar/dock stays visible until the user explicitly asks for
     // fullscreen. This button is that explicit ask for anyone without a
-    // keyboard/remote handy -- it calls the exact same toggleFullScreen()
-    // function F11 already does (see onKeyDown below), not a second
-    // implementation of the same idea.
+    // keyboard/remote handy. It used to double up with F11 calling the same
+    // toggleFullScreen() function; F11 now belongs to Chrome alone (see
+    // onKeyDown above), so this button is the one remaining, deliberate way
+    // this script itself drives fullscreen -- distinct from Immersive Mode
+    // below, which is a separate, persisted, higher-stakes setting rather
+    // than a plain view toggle.
     const FULLSCREEN_BTN_ID = "arktube-fullscreen-btn";
 
     function updateFullscreenButtonVisibility() {
@@ -169,6 +172,170 @@
         }
     }
 
+    // --- On-screen Immersive Mode button -----------------------------------
+    //
+    // What this is: a user-defined, persisted "lock this down" setting,
+    // toggled by its own dedicated button (top-left, mirroring where a
+    // native window control would sit, deliberately away from the
+    // fullscreen button's bottom-right corner so the two are never
+    // mistaken for one control) -- separate from, and not bound to, F11.
+    //
+    // What "immersive" means when it's on:
+    //   1. Fullscreen, right now, this session (same mechanism as the
+    //      fullscreen button above).
+    //   2. A best-effort, same-session JS guard against the obvious
+    //      keyboard/mouse paths into devtools (see isDevToolsShortcut()
+    //      and the contextmenu listener registered below).
+    //   3. The *real* lockdown -- actual Chrome-level devtools/kiosk
+    //      hardening -- applied the next time ARKtube is launched, by
+    //      whichever packaging launcher started it (see
+    //      packaging/linux/build-deb.sh and packaging/linux/AppRun).
+    //
+    // Why (3) can't happen immediately, from here: chrome mode's Chrome
+    // process is a separate, already-running process by the time this
+    // script executes (chrome.cpp spawns it once, with args baked in at
+    // that moment); nothing server-side re-reads its own config file
+    // mid-session. And this script deliberately can't ask Neutralino to
+    // relaunch itself with new args either -- that native call
+    // (os.execCommand, which is what Neutralino.app.restartProcess()
+    // uses under the hood) is intentionally left OFF this app's
+    // nativeAllowList in neutralino.config.json, because this script runs
+    // on youtube.com/tv's own origin, a page this app doesn't control,
+    // and giving that page arbitrary command-exec capability just to
+    // support this button would be a far bigger hole than the button is
+    // worth. So instead: this script's only job is to remember the user's
+    // choice (via Neutralino.storage, a small sandboxed key/value store --
+    // see neutralino.config.json's nativeAllowList -- NOT youtube.com's
+    // own localStorage, which this app doesn't own and could be cleared
+    // from YouTube's own settings). The packaging launcher -- a trusted,
+    // local script, not a remote page -- reads that same persisted value
+    // directly off disk and decides the real Chrome flags for the next
+    // launch. Two different layers, two different trust levels, each
+    // deciding only what it's actually able to enforce.
+    const IMMERSIVE_BTN_ID = "arktube-immersive-btn";
+    const IMMERSIVE_STORAGE_KEY = "immersiveMode";
+
+    let immersiveModeEnabled = false;
+
+    function isDevToolsShortcut(e) {
+        if (e.key === "F12") {
+            return true;
+        }
+        const key = (e.key || "").toLowerCase();
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (key === "i" || key === "j" || key === "c")) {
+            return true; // Inspect / Console / element-picker shortcuts
+        }
+        if ((e.ctrlKey || e.metaKey) && key === "u") {
+            return true; // View source
+        }
+        return false;
+    }
+
+    function updateImmersiveButtonVisual() {
+        const btn = document.getElementById(IMMERSIVE_BTN_ID);
+        if (!btn) {
+            return;
+        }
+        btn.textContent = immersiveModeEnabled ? "\u{1F512}" : "\u{1F513}"; // 🔒 / 🔓
+        btn.title = immersiveModeEnabled
+            ? "Immersive Mode: ON -- locked down fullscreen. Click to turn off (fully applies after restart)."
+            : "Immersive Mode: OFF. Click to lock down fullscreen (fully applies after restart).";
+    }
+
+    async function loadImmersiveModePreference() {
+        try {
+            const value = await Neutralino.storage.getData(IMMERSIVE_STORAGE_KEY);
+            immersiveModeEnabled = value === "1";
+        } catch (err) {
+            // No stored preference yet (first run, or the key was cleared)
+            // -- default OFF. Never assume ON: an unreadable/missing
+            // preference must fail open to today's existing behavior, not
+            // silently lock someone out of devtools they never asked to
+            // give up.
+            immersiveModeEnabled = false;
+        }
+        updateImmersiveButtonVisual();
+    }
+
+    async function saveImmersiveModePreference(enabled) {
+        try {
+            await Neutralino.storage.setData(IMMERSIVE_STORAGE_KEY, enabled ? "1" : "0");
+        } catch (err) {
+            console.error("Error saving Immersive Mode preference:", err);
+        }
+    }
+
+    async function toggleImmersiveMode() {
+        immersiveModeEnabled = !immersiveModeEnabled;
+        updateImmersiveButtonVisual();
+        await saveImmersiveModePreference(immersiveModeEnabled);
+
+        if (immersiveModeEnabled) {
+            await toggleFullScreen();
+        }
+
+        try {
+            Neutralino.os.showMessageBox(
+                immersiveModeEnabled ? "Immersive Mode enabled" : "Immersive Mode disabled",
+                immersiveModeEnabled
+                    ? "Fullscreen is on now, and devtools shortcuts are blocked for this session. Restart ARKtube to also lock down Chrome itself (devtools, kiosk mode)."
+                    : "Immersive Mode is off. Restart ARKtube to fully restore normal Chrome mode."
+            );
+        } catch (err) {
+            console.error("Error showing Immersive Mode message box:", err);
+        }
+    }
+
+    function insertImmersiveButton() {
+        if (document.getElementById(IMMERSIVE_BTN_ID)) {
+            return;
+        }
+
+        const btn = document.createElement("button");
+        btn.id = IMMERSIVE_BTN_ID;
+        btn.type = "button";
+        btn.tabIndex = -1; // click/touch only, same reasoning as the fullscreen button above
+
+        Object.assign(btn.style, {
+            position: "fixed",
+            top: "16px",
+            left: "16px",
+            zIndex: "2147483647",
+            width: "44px",
+            height: "44px",
+            borderRadius: "50%",
+            border: "none",
+            background: "rgba(0, 0, 0, 0.55)",
+            color: "#fff",
+            fontSize: "20px",
+            lineHeight: "44px",
+            textAlign: "center",
+            padding: "0",
+            cursor: "pointer",
+            opacity: "0.55",
+            transition: "opacity 0.15s ease"
+        });
+        btn.addEventListener("mouseenter", () => { btn.style.opacity = "1"; });
+        btn.addEventListener("mouseleave", () => { btn.style.opacity = "0.55"; });
+        btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleImmersiveMode();
+        });
+
+        document.body.appendChild(btn);
+        updateImmersiveButtonVisual();
+    }
+
+    function initImmersiveButton() {
+        if (document.body) {
+            insertImmersiveButton();
+        } else {
+            document.addEventListener("DOMContentLoaded", insertImmersiveButton, { once: true });
+        }
+        loadImmersiveModePreference();
+    }
+
     async function exitFullScreenIfActive() {
         try {
             if (isNativeWindowMode()) {
@@ -200,16 +367,37 @@
     }
 
     function onKeyDown(e) {
+        // Immersive Mode's keyboard-shortcut guard runs first and can
+        // swallow the event outright -- see insertImmersiveButton() below
+        // for what this is and, importantly, what it isn't (a real
+        // security boundary).
+        if (immersiveModeEnabled && isDevToolsShortcut(e)) {
+            e.preventDefault();
+            e.stopPropagation();
+            return;
+        }
+
         // youtube.com/tv is built for a 10-foot, full-screen, remote-driven
         // experience (this is the same UI Cobalt renders on certified TVs).
-        // F11 mirrors normal browser/TV-app behavior; Escape only backs out
-        // of fullscreen (it never quits the app outright); Home is desktop-
-        // app augmentation on top of that, since a real remote's Home
-        // button has no keyboard equivalent otherwise.
-        if (e.key === "F11") {
-            e.preventDefault();
-            toggleFullScreen();
-        } else if (e.key === "Escape") {
+        // Escape only backs out of fullscreen (it never quits the app
+        // outright); Home is desktop-app augmentation on top of that,
+        // since a real remote's Home button has no keyboard equivalent
+        // otherwise.
+        //
+        // F11 is deliberately NOT handled here. Chrome mode (this app's
+        // actual default -- see neutralino.config.json) launches a real,
+        // separate Chrome/Chromium process (chrome.cpp), which already
+        // owns a native, built-in F11 fullscreen toggle of its own. This
+        // script used to *also* call toggleFullScreen() on the same
+        // keypress, which meant two independent handlers -- Chrome's
+        // native one and this injected one -- both raced to answer the
+        // same physical key. F11 is now left alone as Chrome's own,
+        // user-expected behavior. This app's own "Immersive Mode" concept
+        // (see insertImmersiveButton() below) is a deliberately separate,
+        // explicitly-triggered, persisted setting instead of being tied
+        // to a key Chrome already owns -- no more dual authority over the
+        // same input.
+        if (e.key === "Escape") {
             exitFullScreenIfActive();
         } else if (e.key === "Home") {
             e.preventDefault();
@@ -461,8 +649,17 @@
 
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("resize", onWindowResize);
+    // Same-session, best-effort half of Immersive Mode's devtools guard --
+    // blocks the right-click "Inspect" entry point. See
+    // insertImmersiveButton() above for what this can and can't do.
+    document.addEventListener("contextmenu", (e) => {
+        if (immersiveModeEnabled) {
+            e.preventDefault();
+        }
+    }, true);
     initGamepadSupport();
     initFullscreenButton();
+    initImmersiveButton();
 
     // TODO: https://github.com/neutralinojs/neutralinojs/issues/615
     if (NL_OS !== "Darwin") {

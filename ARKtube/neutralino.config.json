@@ -19,7 +19,9 @@
     "debug.log",
     "os.setTray",
     "os.showMessageBox",
-    "events.broadcast"
+    "events.broadcast",
+    "storage.getData",
+    "storage.setData"
   ],
   "modes": {
     "window": {
@@ -72,7 +74,9 @@
         "debug.log",
         "os.setTray",
         "os.showMessageBox",
-        "events.broadcast"
+        "events.broadcast",
+        "storage.getData",
+        "storage.setData"
       ]
     }
   },
