@@ -303,3 +303,96 @@ cleanup logic from §5–§7 was deliberately left in place (it's an
 inert no-op under window mode, since it only ever matches processes
 against this app's own chrome-profile directory) so that switching back
 doesn't reintroduce the orphaned-process bug either.
+
+## 10. Wayland: the hybrid embed's fallback never actually loaded YouTube
+
+The later move to a *hybrid* window/chrome-embed model (Neutralino owns
+the real top-level window; `packaging/linux/embed-chrome.sh` spawns a
+real, separate Chrome process and X11-reparents it inside that window,
+to get chrome mode's full `--user-agent` spoof back — see that script)
+correctly detected that X11 reparenting is impossible on Wayland and
+bailed out rather than erroring. But bailing out just meant exiting 0
+and doing nothing — nothing then told Neutralino's own window, which was
+still sitting on `resources/index.html`'s local "Starting ARKtube…"
+backdrop page, to load YouTube any other way. On a Wayland session the
+app would launch, look like it was starting, and never go any further:
+
+```text
+embed-chrome: Wayland session detected - arbitrary window reparenting isn't
+permitted here. Falling back to plain window mode; ARKtube will keep
+running with its own webview loading the local shell page only. Run
+under Xwayland/X11 for the hybrid embed.
+```
+
+That log line was accurate about *why* — it just wasn't true that
+"plain window mode" did anything useful once the embed was ruled out.
+
+A separate, unrelated bug was hiding behind the same symptom on some
+setups: `neutralino.config.json` had `documentRoot: "/resources/"` *and*
+`url: "/resources/#embed-shell"` — Neutralino resolves `url` against
+`documentRoot`, so this asked for `/resources/resources/index.html`,
+which doesn't exist:
+
+```text
+ERROR NE_RS_UNBLDRE: Unable to load application resource file /resources/resources/index.html
+```
+
+Fixed by dropping the redundant `/resources/` prefix from `url` (now
+`/#embed-shell`) — `documentRoot` already supplies it.
+
+**The actual fix:** `AppRun` and the `.deb` launcher now run
+`embed-chrome.sh`'s own Wayland/tool/Chrome checks themselves, *before*
+launching Neutralino at all, and when the embed isn't going to be
+possible they pass Neutralino a `--native-fallback` argument instead of
+spawning `embed-chrome.sh`. `resources/js/app-init.js` reads that back
+via `NL_ARGS` (available through `injectGlobals`) and, if it's set and
+this webview isn't already on youtube.com, `location.replace()`s
+straight to `https://www.youtube.com/tv#/` — the same direct-load
+architecture §9 originally described, now used as a fallback rather
+than the default. `modes.window.extendUserAgentWith` (restored in
+`neutralino.config.json`, alongside the `url` fix above) is what that
+fallback gets in place of Chrome's full `--user-agent` replacement — the
+same partial-spoof trade-off §9 already covers, unverified against a
+live YouTube response for the same reason given there.
+
+One knock-on change: `xdotool`/`wmctrl`/`xbindkeys` were `Depends` on
+the `.deb` package, which meant every install pulled in X11-only
+tooling a Wayland-only desktop would never use. Now that a missing
+embed falls back gracefully instead of breaking, they're `Recommends`
+instead — present by default via normal dependency resolution, but not
+a hard requirement to install or run the package.
+
+**Files changed:** `neutralino.config.json` (`url`,
+`extendUserAgentWith`), `packaging/linux/AppRun`,
+`packaging/linux/build-deb.sh`, `packaging/linux/embed-chrome.sh`
+(comments only — its own checks are now a safety net, not the primary
+path), `resources/js/app-init.js`.
+
+**Verification steps:**
+
+```bash
+# Wayland (or: unset/empty XDG_SESSION_TYPE, or rename xdotool/wmctrl/
+# xbindkeys/chrome off PATH temporarily, to force the same fallback on X11)
+echo $XDG_SESSION_TYPE   # should print "wayland"
+./ARKtube-x86_64.AppImage
+# Expected: stderr logs "hybrid Chrome embed unavailable... loading
+# YouTube directly in ARKtube's own webview instead", and the window
+# actually shows youtube.com/tv shortly after — not stuck on "Starting
+# ARKtube..." indefinitely. F11/Escape/Home and the on-screen fullscreen/
+# Immersive Mode buttons should still work, driven by app-init.js's
+# existing fallback keydown handling.
+
+# X11, with xdotool/wmctrl/xbindkeys/chrome all present
+echo $XDG_SESSION_TYPE   # should print "x11"
+./ARKtube-x86_64.AppImage
+# Expected: unchanged from §9 - the hybrid embed still runs, Chrome gets
+# reparented in, full Leanback UA spoof still applies.
+```
+
+Not verified end-to-end here — no display server in this environment,
+same caveat every doc in this tree carries (see §9, `CURSOR-AUTO-HIDE.md`).
+What's checked is the control flow: which branch each launcher takes
+under which `XDG_SESSION_TYPE`/tool-availability combination, and that
+`app-init.js`'s redirect condition only ever fires once per real
+navigation (guarded the same way `__neutralinoAppInitialized` already
+guards the rest of this file against YouTube's own scripts re-running it).

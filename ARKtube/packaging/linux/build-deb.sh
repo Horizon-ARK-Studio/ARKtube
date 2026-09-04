@@ -54,12 +54,16 @@ install -Dm644 "${ROOT_DIR}/resources/icons/appIcon.png" \
 # install lands under /usr, which is read-only for the running user.
 #
 # Mirrors AppRun's hybrid-mode launch: Neutralino runs in plain window
-# mode and owns the real top-level window; /usr/lib/arktube/embed-chrome.sh
+# mode and owns the real top-level window; on X11, with the needed tools
+# and a Chrome/Chromium binary present, /usr/lib/arktube/embed-chrome.sh
 # spawns a real Chrome process and reparents it inside that window (see
 # that script for the X11 reparenting + global F11/Escape/Home hotkey
-# details). Chrome is a direct child of this launcher rather than a
+# details), as a direct child of this launcher rather than a
 # fully-detached process Neutralino itself owns, so the close-button
-# lifecycle coupling below only needs to watch, not un-orphan, it.
+# lifecycle coupling below only needs to watch, not un-orphan, it. On
+# Wayland (or without those tools/Chrome), it instead launches Neutralino
+# with --native-fallback so its own webview loads YouTube directly - see
+# docs/bugs-caught/BUGS-CAUGHT.md §10.
 cat > "${PKGROOT}/usr/bin/arktube" <<'LAUNCHER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -103,23 +107,64 @@ if [ -f "${IMMERSIVE_FLAG_FILE}" ] && [ "$(cat "${IMMERSIVE_FLAG_FILE}" 2>/dev/n
     IMMERSIVE_ARG="--immersive"
 fi
 
-/usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "$@" &
+# --- Decide, up front, whether the X11 hybrid embed is even possible -----
+# See packaging/linux/AppRun for the full explanation and
+# docs/bugs-caught/BUGS-CAUGHT.md §10. xdotool/wmctrl/xbindkeys are only
+# Recommends (not Depends) on this package precisely so a Wayland-only
+# desktop isn't forced to install X11 tooling it will never use - so this
+# check still has to happen at runtime, not just at install time.
+EMBED_SUPPORTED=1
+if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    EMBED_SUPPORTED=0
+fi
+if [ "${EMBED_SUPPORTED}" = "1" ]; then
+    for tool in xdotool wmctrl xbindkeys; do
+        if ! command -v "${tool}" >/dev/null 2>&1; then
+            EMBED_SUPPORTED=0
+            break
+        fi
+    done
+fi
+if [ "${EMBED_SUPPORTED}" = "1" ]; then
+    EMBED_SUPPORTED=0
+    for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            EMBED_SUPPORTED=1
+            break
+        fi
+    done
+fi
+
+NEUTRALINO_EXTRA_ARGS=()
+if [ "${EMBED_SUPPORTED}" = "0" ]; then
+    echo "ARKtube: hybrid Chrome embed unavailable (Wayland session, or" \
+         "missing xdotool/wmctrl/xbindkeys/Chrome) - loading YouTube" \
+         "directly in ARKtube's own webview instead." >&2
+    NEUTRALINO_EXTRA_ARGS+=(--native-fallback)
+fi
+
+/usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "${NEUTRALINO_EXTRA_ARGS[@]}" "$@" &
 NEUTRALINO_PID=$!
 
-sleep 1
-/usr/lib/arktube/embed-chrome.sh "ARKtube" "https://www.youtube.com/tv#/" \
-    "${CHROME_PROFILE_DIR}" "${IMMERSIVE_ARG}" &
-EMBED_PID=$!
-
-while kill -0 "${NEUTRALINO_PID}" 2>/dev/null; do
-    if ! kill -0 "${EMBED_PID}" 2>/dev/null && ! pgrep -f -- "${CHROME_LOCK_PATTERN}" >/dev/null 2>&1; then
-        kill -TERM "${NEUTRALINO_PID}" 2>/dev/null || true
-        break
-    fi
+EMBED_PID=""
+if [ "${EMBED_SUPPORTED}" = "1" ]; then
     sleep 1
-done
+    /usr/lib/arktube/embed-chrome.sh "ARKtube" "https://www.youtube.com/tv#/" \
+        "${CHROME_PROFILE_DIR}" "${IMMERSIVE_ARG}" &
+    EMBED_PID=$!
+fi
 
-kill -TERM "${EMBED_PID}" 2>/dev/null || true
+if [ -n "${EMBED_PID}" ]; then
+    while kill -0 "${NEUTRALINO_PID}" 2>/dev/null; do
+        if ! kill -0 "${EMBED_PID}" 2>/dev/null && ! pgrep -f -- "${CHROME_LOCK_PATTERN}" >/dev/null 2>&1; then
+            kill -TERM "${NEUTRALINO_PID}" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+    kill -TERM "${EMBED_PID}" 2>/dev/null || true
+fi
+
 wait "${NEUTRALINO_PID}" 2>/dev/null || true
 LAUNCHER
 chmod 755 "${PKGROOT}/usr/bin/arktube"
@@ -137,7 +182,8 @@ Section: video
 Priority: optional
 Architecture: ${ARCH}
 Installed-Size: ${INSTALLED_SIZE_KB}
-Depends: libwebkit2gtk-4.1-0, xdotool, wmctrl, xbindkeys
+Depends: libwebkit2gtk-4.1-0
+Recommends: xdotool, wmctrl, xbindkeys
 Maintainer: Horizon ARK Studio
 Description: YouTube, as a desktop app.
  A lightweight YouTube desktop client built with Neutralinojs.

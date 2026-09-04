@@ -5,7 +5,7 @@
   "defaultMode": "window",
   "port": 0,
   "documentRoot": "/resources/",
-  "url": "/resources/#embed-shell",
+  "url": "/#embed-shell",
   "enableServer": true,
   "enableNativeAPI": true,
   "tokenSecurity": "one-time",
@@ -42,7 +42,8 @@
       "exitProcessOnClose": false,
       "injectGlobals": true,
       "injectClientLibrary": true,
-      "injectScript": "/resources/js/app-init.js"
+      "injectScript": "/resources/js/app-init.js",
+      "extendUserAgentWith": " Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;"
     },
     "browser": {
       "globalVariables": {

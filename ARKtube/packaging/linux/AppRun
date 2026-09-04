@@ -121,17 +121,63 @@ if [ -f "${IMMERSIVE_FLAG_FILE}" ] && [ "$(cat "${IMMERSIVE_FLAG_FILE}" 2>/dev/n
     IMMERSIVE_ARG="--immersive"
 fi
 
+# --- Decide, up front, whether the X11 hybrid embed is even possible -----
+# Mirrors embed-chrome.sh's own checks (kept there too, as a safety net
+# for anyone invoking it directly), but runs *before* Neutralino's window
+# opens rather than after, because the answer changes what we launch
+# Neutralino with. Without this, a Wayland session (or a missing
+# xdotool/wmctrl/xbindkeys/Chrome) used to mean embed-chrome.sh quietly
+# gave up *after* Neutralino was already showing the local shell page --
+# which nothing then told to do anything else, so the app just sat on
+# "Starting ARKtube..." forever with no YouTube ever loading. See
+# docs/bugs-caught/BUGS-CAUGHT.md §10.
+EMBED_SUPPORTED=1
+if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    EMBED_SUPPORTED=0
+fi
+if [ "${EMBED_SUPPORTED}" = "1" ]; then
+    for tool in xdotool wmctrl xbindkeys; do
+        if ! command -v "${tool}" >/dev/null 2>&1; then
+            EMBED_SUPPORTED=0
+            break
+        fi
+    done
+fi
+if [ "${EMBED_SUPPORTED}" = "1" ]; then
+    EMBED_SUPPORTED=0
+    for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            EMBED_SUPPORTED=1
+            break
+        fi
+    done
+fi
+
+NEUTRALINO_EXTRA_ARGS=()
+if [ "${EMBED_SUPPORTED}" = "0" ]; then
+    echo "ARKtube: hybrid Chrome embed unavailable (Wayland session, or" \
+         "missing xdotool/wmctrl/xbindkeys/Chrome) - loading YouTube" \
+         "directly in ARKtube's own webview instead." >&2
+    # Picked up by resources/js/app-init.js via NL_ARGS (injectGlobals) --
+    # tells it to redirect this webview straight to youtube.com/tv instead
+    # of sitting on the local shell page with nothing else to render it.
+    NEUTRALINO_EXTRA_ARGS+=(--native-fallback)
+fi
+
 # --- Launch Neutralino (the real, WM-managed window) ---------------------
-"${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "$@" &
+"${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "${NEUTRALINO_EXTRA_ARGS[@]}" "$@" &
 NEUTRALINO_PID=$!
 
-# --- Launch and embed Chrome inside it ------------------------------------
-# Give Neutralino's window a moment to actually exist before
-# embed-chrome.sh starts searching for it by title.
-sleep 1
-"${HERE}/embed-chrome.sh" "ARKtube" "https://www.youtube.com/tv#/" \
-    "${CHROME_PROFILE_DIR}" "${IMMERSIVE_ARG}" &
-EMBED_PID=$!
+# --- Launch and embed Chrome inside it (X11 only; see EMBED_SUPPORTED) ---
+EMBED_PID=""
+if [ "${EMBED_SUPPORTED}" = "1" ]; then
+    # Give Neutralino's window a moment to actually exist before
+    # embed-chrome.sh starts searching for it by title.
+    sleep 1
+    "${HERE}/embed-chrome.sh" "ARKtube" "https://www.youtube.com/tv#/" \
+        "${CHROME_PROFILE_DIR}" "${IMMERSIVE_ARG}" &
+    EMBED_PID=$!
+fi
 
 # --- Close-button lifecycle coupling -------------------------------------
 # Chrome is now spawned by embed-chrome.sh, as a plain child of this
@@ -143,14 +189,18 @@ EMBED_PID=$!
 # Chrome (or embed-chrome.sh) to exit, since it never spawned Neutralino
 # and has no other path back to it; (b) the embedded Chrome window is
 # killed/crashes on its own -- with no visible content left, Neutralino's
-# now-empty backdrop window should not linger either.
-while kill -0 "${NEUTRALINO_PID}" 2>/dev/null; do
-    if ! kill -0 "${EMBED_PID}" 2>/dev/null && ! pgrep -f -- "${CHROME_LOCK_PATTERN}" >/dev/null 2>&1; then
-        kill -TERM "${NEUTRALINO_PID}" 2>/dev/null || true
-        break
-    fi
-    sleep 1
-done
+# now-empty backdrop window should not linger either. Under the native
+# fallback (EMBED_PID unset, no CHROME_LOCK_PATTERN process to watch for),
+# this loop has nothing to tear down early and just waits on Neutralino.
+if [ -n "${EMBED_PID}" ]; then
+    while kill -0 "${NEUTRALINO_PID}" 2>/dev/null; do
+        if ! kill -0 "${EMBED_PID}" 2>/dev/null && ! pgrep -f -- "${CHROME_LOCK_PATTERN}" >/dev/null 2>&1; then
+            kill -TERM "${NEUTRALINO_PID}" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+    kill -TERM "${EMBED_PID}" 2>/dev/null || true
+fi
 
-kill -TERM "${EMBED_PID}" 2>/dev/null || true
 wait "${NEUTRALINO_PID}" 2>/dev/null || true

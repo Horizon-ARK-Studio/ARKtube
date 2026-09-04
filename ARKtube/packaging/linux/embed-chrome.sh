@@ -20,9 +20,18 @@
 # which window currently has input focus.
 #
 # Requires (X11 desktop only - this cannot work on Wayland, which does not
-# allow one client to reparent another client's window; ARKtube falls
-# back to plain window-mode-only there, see the XDG_SESSION_TYPE check
-# below): xdotool, wmctrl, xbindkeys.
+# allow one client to reparent another client's window): xdotool, wmctrl,
+# xbindkeys, plus a Chrome/Chromium binary.
+#
+# AppRun / the .deb launcher now run this exact same set of checks
+# *before* even launching Neutralino, and skip invoking this script
+# entirely when any of them fail - passing Neutralino a --native-fallback
+# argument instead, so resources/js/app-init.js loads YouTube directly in
+# Neutralino's own webview (see docs/bugs-caught/BUGS-CAUGHT.md §10). The
+# checks below are kept as a safety net for anyone invoking this script
+# directly, but in the normal launch path they're redundant by design -
+# if you're reading this because the app is stuck on the local shell page
+# instead of falling back, the bug is in the caller's pre-check, not here.
 #
 # Usage:
 #   embed-chrome.sh <neutralino-window-title> <youtube-url> <chrome-profile-dir> [--immersive]

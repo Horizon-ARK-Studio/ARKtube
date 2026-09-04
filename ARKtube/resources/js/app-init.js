@@ -16,14 +16,20 @@
       - The on-screen fullscreen/Immersive Mode buttons, the devtools-shortcut
         guard, cursor auto-hide, and the gamepad-to-keyboard remap are all
         DOM affordances added to *this* page -- they're only visible/active
-        while this shell page is what's on screen (startup, or if
-        embed-chrome.sh falls back out of the embed entirely -- e.g. no
-        xdotool/wmctrl/xbindkeys, or a Wayland session; see that script).
-        Once Chrome is embedded on top of it, none of that DOM is visible or
-        reachable, by design -- F11/Escape/Home are instead grabbed globally
-        by embed-chrome.sh itself (see onKeyDown() below), and Immersive
-        Mode's real hardening is applied as launch-time Chrome flags by
-        AppRun / the .deb launcher, same as before.
+        while this shell page is what's on screen (startup, or the native
+        fallback below, when embed-chrome.sh's embed isn't available at
+        all -- e.g. no xdotool/wmctrl/xbindkeys, or a Wayland session; see
+        that script). Once Chrome is embedded on top of it, none of that
+        DOM is visible or reachable, by design -- F11/Escape/Home are
+        instead grabbed globally by embed-chrome.sh itself (see
+        onKeyDown() below), and Immersive Mode's real hardening is applied
+        as launch-time Chrome flags by AppRun / the .deb launcher, same as
+        before.
+      - When the embed isn't available at all, this script instead
+        redirects this very webview straight to youtube.com/tv (see the
+        native-fallback block right below this comment) -- there is no
+        second Chrome process in that case, so this page's own webview is
+        the only thing that can render YouTube.
 
     Kept defensive throughout regardless, since injectScript still runs
     ahead of this page's own script executing in the normal DOM order.
@@ -34,6 +40,45 @@
         return;
     }
     window.__neutralinoAppInitialized = true;
+
+    // --- Native fallback: no hybrid Chrome embed available -------------
+    //
+    // AppRun / the .deb launcher work out, before Neutralino's own window
+    // even opens, whether packaging/linux/embed-chrome.sh's X11 embed is
+    // possible at all (a Wayland session -- where one client reparenting
+    // another's window isn't permitted, full stop -- or a missing
+    // xdotool/wmctrl/xbindkeys/Chrome dependency; see embed-chrome.sh's
+    // own comments for why each of those rules it out). When it isn't,
+    // they don't spawn embed-chrome.sh at all, and instead launch
+    // Neutralino itself with an extra `--native-fallback` argument, which
+    // lands in NL_ARGS (available once injectGlobals:true has run --
+    // see neutralino.config.json).
+    //
+    // Without a separate Chrome process there is nothing else to render
+    // YouTube, so this webview has to do it directly: point its own
+    // location at youtube.com/tv instead of sitting on the local shell
+    // page (resources/index.html) forever. Because injectScript runs on
+    // every page this webview loads, this same script -- and everything
+    // below it (fullscreen, Immersive Mode, the gamepad remap, cursor
+    // auto-hide, F11/Escape/Home) -- keeps working unchanged once we're
+    // there; the `__neutralinoAppInitialized` guard above just makes sure
+    // this block itself doesn't run a second time on the new page.
+    //
+    // The one real trade-off, not a bug: Neutralino's own webview can
+    // only *extend* its user agent (see `extendUserAgentWith` in
+    // neutralino.config.json), not fully replace it the way Chrome's
+    // `--user-agent` flag does in the X11 hybrid path -- so YouTube's
+    // server-side device detection may or may not still serve the
+    // Leanback/TV interface here. See docs/bugs-caught/BUGS-CAUGHT.md §9
+    // and §10 for the full history of that trade-off.
+    if (
+        typeof NL_ARGS !== "undefined" &&
+        NL_ARGS.some(function (arg) { return arg.indexOf("--native-fallback") === 0; }) &&
+        !/(^|\.)youtube\.com$/.test(location.hostname)
+    ) {
+        location.replace("https://www.youtube.com/tv#/");
+        return;
+    }
 
     function safeExit() {
         // Gracefully shut the native process down instead of relying on
