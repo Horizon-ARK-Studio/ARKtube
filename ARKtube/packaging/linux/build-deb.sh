@@ -131,14 +131,47 @@ fi
 if [ "${EMBED_SUPPORTED}" = "1" ] && ! xdotool getdisplaygeometry >/dev/null 2>&1; then
     EMBED_SUPPORTED=0
 fi
+CHROME_CANDIDATE=""
 if [ "${EMBED_SUPPORTED}" = "1" ]; then
     EMBED_SUPPORTED=0
     for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
         if command -v "${candidate}" >/dev/null 2>&1; then
             EMBED_SUPPORTED=1
+            CHROME_CANDIDATE="${candidate}"
             break
         fi
     done
+fi
+
+# --- Redirect the profile dir if that Chrome/Chromium is snap-confined ---
+# See packaging/linux/AppRun for the full explanation and
+# docs/bugs-caught/BUGS-CAUGHT.md §12 - short version: /usr/bin/chromium
+# on Ubuntu is a snap, snap's home interface can't touch dot-prefixed
+# paths like the ~/.local/share/ARKtube one above, and a snap-confined
+# Chrome handed that path fails by GPU-process-crash-looping rather than
+# with a clean permission error.
+if [ "${EMBED_SUPPORTED}" = "1" ]; then
+    CHROME_REAL_BIN="$(command -v "${CHROME_CANDIDATE}" 2>/dev/null || true)"
+    CHROME_REAL_BIN="$(readlink -f "${CHROME_REAL_BIN}" 2>/dev/null || echo "${CHROME_REAL_BIN}")"
+    case "${CHROME_REAL_BIN}" in
+        /snap/*)
+            SNAP_SLUG="$(echo "${CHROME_REAL_BIN}" | cut -d/ -f3)"
+            SNAP_COMMON="${HOME}/snap/${SNAP_SLUG}/common"
+            mkdir -p "${SNAP_COMMON}" 2>/dev/null || true
+            echo "ARKtube: ${CHROME_CANDIDATE} resolves to a snap" \
+                 "(${CHROME_REAL_BIN}) - using" \
+                 "${SNAP_COMMON}/arktube-chromedata as its profile dir" \
+                 "instead of ${CHROME_PROFILE_DIR}, which snap confinement" \
+                 "can't write to (see docs/bugs-caught/BUGS-CAUGHT.md §12)." >&2
+            CHROME_PROFILE_DIR="${SNAP_COMMON}/arktube-chromedata"
+            CHROME_LOCK_PATTERN="--user-data-dir=${CHROME_PROFILE_DIR}"
+            # Re-run cleanup now that the path is corrected, so a lock
+            # left behind by a previous corrected-path run is still
+            # cleared (the proactive call above ran against the
+            # pre-redirect path). Cheap and idempotent either way.
+            reap_stale_chrome
+            ;;
+    esac
 fi
 
 NEUTRALINO_EXTRA_ARGS=()

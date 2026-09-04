@@ -139,6 +139,30 @@ CHROME_ARGS=(
     # work on Wayland, not just on a real X11 session (see the top of
     # this file and docs/bugs-caught/BUGS-CAUGHT.md §11).
     "--ozone-platform=x11"
+    # Ubuntu 23.10+ (24.04 LTS onward, by default) blocks the unprivileged
+    # user-namespace sandbox Chromium's utility processes - including the
+    # GPU process - normally use, via
+    # kernel.apparmor_restrict_unprivileged_userns=1. Unless the exact
+    # Chrome/Chromium binary on PATH ships its own AppArmor profile
+    # granting `userns` (as official, recent .deb builds of Google Chrome
+    # do, but a plain distro `chromium` package often doesn't), the GPU
+    # process's own sandbox setup fails on launch, over and over, until
+    # Chromium gives up entirely ("GPU process launch failed:
+    # error_code=1002", repeated, then "GPU process isn't usable.
+    # Goodbye.") - which takes this whole embed down with it, since
+    # embed-chrome.sh's geometry-follow loop exits the moment the Chrome
+    # PID it's watching disappears. This is unrelated to snap
+    # confinement (see docs/bugs-caught/BUGS-CAUGHT.md §12) - it hits a
+    # perfectly normal .deb-installed Chrome/Chromium just as easily.
+    # --disable-gpu-sandbox is the narrow, Chromium-team-recommended
+    # mitigation for exactly this failure mode (see
+    # docs/bugs-caught/BUGS-CAUGHT.md §14): it drops the sandbox for the
+    # GPU process specifically, rather than every process (`--no-sandbox`
+    # would do that, and is deliberately not used here). The GPU process
+    # doesn't execute page-supplied script, so this is a much smaller
+    # concession than it sounds - it's the same trade-off Chromium's own
+    # engineers suggest first when triaging this exact error code.
+    "--disable-gpu-sandbox"
     "--window-position=0,0"
     "--window-size=${PARENT_W:-1280},${PARENT_H:-720}"
     "--no-first-run"

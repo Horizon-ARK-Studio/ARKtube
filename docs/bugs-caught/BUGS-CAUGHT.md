@@ -480,3 +480,258 @@ this file — no display server in this environment. What's checked is the
 control flow and that `DISPLAY`/`xdotool getdisplaygeometry` is a
 correct, standard way to detect "an X11 display (real or Xwayland) is
 reachable" independent of `XDG_SESSION_TYPE`.
+
+## 12. Snap-confined Chrome/Chromium can't write the profile dir §11 hands it, and fails as a GPU crash instead of a permission error
+
+§11 made the hybrid embed work under Wayland-with-Xwayland, which covers
+the overwhelming majority of real desktops. On one of those — a stock
+Ubuntu install, Xwayland present, `/usr/bin/chromium` on PATH — a user
+still got a hard crash on every launch:
+
+```text
+embed-chrome: found Chrome window 6291466, reparenting into 12582913
+embed-chrome: xbindkeys grabbing F11/Escape/Home globally (pid 191285)
+...
+[191274:191797:...:ERROR:content/browser/gpu/gpu_process_host.cc:1029] GPU process launch failed: error_code=1002
+(repeats ~6x)
+[191274:191274:...:FATAL:content/browser/gpu/gpu_data_manager_impl_private.cc:417] GPU process isn't usable. Goodbye.
+embed-chrome: Neutralino window or Chrome process gone; exiting.
+```
+
+The reparenting itself worked (§11 is fine) — Chrome's *own* GPU process
+died immediately after, repeatedly, until Chromium gave up and exited,
+which took the whole embed down with it (`embed-chrome.sh`'s geometry-follow
+loop exits as soon as the Chrome PID it's watching disappears).
+
+**Root cause:** on Ubuntu (and most other distros now), `chromium` /
+`chromium-browser` isn't a regular binary — `/usr/bin/chromium` is a
+thin wrapper around a strictly-confined *snap*. A confined snap's only
+route into `$HOME` at all is the `home` interface, which is auto-connected
+but — by explicit, documented design, not a bug — refuses read/write
+access to **any path with a dot-prefixed component**: `~/.cache/...`,
+`~/.config/...`, and `~/.local/...` are all off-limits, snap or no snap
+argument on the command line notwithstanding. `CHROME_PROFILE_DIR` in
+`AppRun`/the `.deb` launcher is `${ARKTUBE_DATA_DIR}/.tmp/chromedata`,
+i.e. `~/.local/share/ARKtube/.tmp/chromedata` — squarely inside `~/.local`.
+
+Handed a `--user-data-dir` it's confined away from, Chromium doesn't fail
+with a clean "permission denied" - it silently can't create the profile,
+the GPU shader/disk cache, `Local State`, etc, and the GPU process (which
+needs to open files under that directory as part of its own init) crashes
+on launch instead. Nothing here is Wayland- or Xwayland-specific — the
+same crash happens on a real X11 session too, with the same snap-confined
+binary and the same dot-prefixed profile path; it just so happened the
+report that caught this was on a Wayland/Xwayland machine, right after §11
+shipped, which made it look at first like a new Wayland-specific failure
+mode. It reads like a GPU/driver bug (the actual log output never mentions
+snap, confinement, or the profile directory at all) but isn't one — the
+exact same browser, run standalone outside ARKtube with its own default
+profile location, plays video with GPU acceleration on the same machine
+without issue.
+
+**The fix:** `AppRun` and the `.deb` launcher's embedded script now resolve
+the chosen Chrome/Chromium candidate's real path (`command -v` +
+`readlink -f`) right after picking it, and check whether it lives under
+`/snap/`. If it does, `CHROME_PROFILE_DIR`/`CHROME_LOCK_PATTERN` are
+redirected to `~/snap/<snap-name>/common/arktube-chromedata` —
+`SNAP_USER_COMMON`, the one location every version of that snap is always
+allowed to read and write, persisted across snap revisions, and created
+automatically by snapd the first time the snap itself runs (the launcher
+also `mkdir -p`s it defensively, in case the snap has never been launched
+standalone). `reap_stale_chrome` is re-run immediately after the redirect,
+since its first, proactive call — before the redirect logic runs — still
+checked the old, pre-redirect path.
+
+Non-snap Chrome/Chromium (a `.deb`-installed `google-chrome-stable`, or a
+distro that ships an unconfined `chromium` package) is unaffected —
+`CHROME_REAL_BIN` won't resolve under `/snap/` and `CHROME_PROFILE_DIR`
+is left exactly as §9–§11 already had it.
+
+**Files changed:** `packaging/linux/AppRun`, `packaging/linux/build-deb.sh`
+(same redirect logic in both, since the `.deb`'s launcher is a heredoc
+copy of AppRun's, not a shared script).
+
+**Verification steps:**
+
+```bash
+# Snap Chrome/Chromium (the common Ubuntu case) - the actual bug
+which chromium              # -> /usr/bin/chromium
+readlink -f "$(which chromium)"   # -> /snap/chromium/<rev>/usr/lib/.../chrome
+./ARKtube-x86_64.AppImage
+# Expected: stderr logs "chromium resolves to a snap (...) - using
+# ~/snap/chromium/common/arktube-chromedata as its profile dir instead
+# of .../.local/share/ARKtube/.tmp/chromedata". No GPU process
+# crash-loop, no FATAL, YouTube loads and plays with the embed intact.
+
+# Non-snap Chrome/Chromium (.deb-installed google-chrome-stable, or an
+# unconfined chromium package on a non-Ubuntu distro) - unaffected path
+readlink -f "$(which google-chrome-stable)"   # -> somewhere under /opt or /usr, not /snap
+./ARKtube-x86_64.AppImage
+# Expected: no snap-redirect log line at all; CHROME_PROFILE_DIR stays
+# ~/.local/share/ARKtube/.tmp/chromedata exactly as before, unchanged
+# from §9-§11 behavior.
+```
+
+Not verified end-to-end here, for the same reason as everywhere else in
+this file — no display server, and no snap tooling, in this environment.
+What's checked is the control flow: that the `/snap/` path-prefix test
+correctly distinguishes a snap-confined binary from a regular one, and
+that the redirected `SNAP_USER_COMMON` path matches what snapd itself
+grants a confined snap unconditional access to (per the `home` interface's
+documented dot-path exclusion, which is what actually blocks the original
+path — independently confirmed against multiple `chromium-browser`
+snap-confinement reports, not specific to ARKtube).
+
+## 13. Neutralino's own `extendUserAgentWith` value was itself invalid, silently
+
+Separately from §12's crash, the same log carried one more line worth
+fixing even though it never brought anything down:
+
+```text
+** (ARKtube:191252): CRITICAL **: 00:45:06.644: void webkit_settings_set_user_agent(WebKitSettings *, const char *): assertion 'WebCore::isValidUserAgentHeaderValue(userAgentString)' failed
+```
+
+This fires on Neutralino's *own* WebKitGTK window (the small local
+backdrop page in hybrid mode; the actual, direct-load webview under the
+§10 native-fallback path) — nothing to do with the embedded Chrome
+process from §12, and not what caused that crash. But it means the
+`modes.window.extendUserAgentWith` value in `neutralino.config.json`
+(the README's fallback (1), and the only thing that fires at all under
+native-fallback with no Chrome/embed available) was never actually being
+applied — WebKitGTK's own validator (added upstream specifically to stop
+apps setting header values HTTP forbids — see webkit.org/b/201077)
+rejects it outright and the call is a no-op.
+
+**Root cause:** WebKit validates a user-agent value against RFC 7231's
+`product-list` grammar: `product *( RWS ( product / comment ) )`, where a
+`comment` is text in parentheses and everything *outside* parentheses has
+to parse as a bare `token["/"version]`. The configured value was:
+
+```text
+ Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;
+```
+
+`Cobalt/26.lts.0-qa` parses fine as a product, but the `; compatible;`
+tacked on after it is bare text with a semicolon, outside any
+parentheses — not a valid product and not a valid comment, so the whole
+string is rejected by `isValidUserAgentHeaderValue()` before WebKitGTK
+ever touches it. (The leading space is fine — this fragment is meant to
+be appended after WebKitGTK's own default UA, per the README's own
+worked example, so it's acting as the `RWS` separator between the last
+product of the default UA and the first product of this extension.)
+
+**The fix:** wrap the trailing `compatible` marker in parentheses, same
+as the existing `(PS4; Leanback Shell)` comment, instead of leaving it as
+bare unparenthesized text:
+
+```text
+ Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa (compatible)
+```
+
+This keeps every token the previous value was trying to convey (device
+family, shell, Cobalt version, a "compatible" marker) while actually
+parsing as valid `product *( RWS ( product / comment ) )`, so
+`extendUserAgentWith` does what the README already claims it does.
+
+**Files changed:** `neutralino.config.json`
+(`modes.window.extendUserAgentWith` only — the `chrome` mode's
+`args`/`--user-agent` and `embed-chrome.sh`'s own `CHROME_UA` are set
+directly on a real Chrome-family process via a command-line flag, which
+Chromium does not run through WebKit's HTTP-header-value validator, so
+neither was actually broken; left as-is to keep this change minimal).
+
+**Verification steps:**
+
+```bash
+./ARKtube-x86_64.AppImage
+# Expected: no "assertion 'WebCore::isValidUserAgentHeaderValue(...)'
+# failed" CRITICAL in stderr. With no embed available (§10's
+# native-fallback path), check the UA ARKtube's own webview is actually
+# sending: open the inspector (enableInspector is already true) and
+# evaluate `navigator.userAgent` - it should now end in
+# "... Cobalt/26.lts.0-qa (compatible)", confirming the extension made
+# it through where it silently didn't before.
+```
+
+Not verified end-to-end here, for the same reason as everywhere else in
+this file — no display server in this environment. What's checked is
+that the corrected string parses under RFC 7231's `product-list` grammar
+(the same grammar WebKit's `isValidUserAgentHeaderValue()` implements),
+by hand-tracing the same token/comment rules the WebKit changeset that
+introduced this validator documents.
+
+## 14. Same GPU-process crash as §12, different (more common) cause: AppArmor userns restriction, not snap - hits plain .deb Chrome too
+
+§12 fixed the crash for the specific case where the Chrome/Chromium
+binary on PATH is a snap. A follow-up report on a machine with **no
+snap involved at all** - `chromium` there is a normal `.deb`-installed
+binary, not `/snap/bin/chromium` - hit the exact same symptom:
+
+```text
+embed-chrome: found Chrome window ..., reparenting into ...
+[...:ERROR:content/browser/gpu/gpu_process_host.cc:...] GPU process launch failed: error_code=1002
+(repeats)
+[...:FATAL:content/browser/gpu/gpu_data_manager_impl_private.cc:...] GPU process isn't usable. Goodbye.
+```
+
+§12's `/snap/*` path check correctly does nothing here (the resolved
+binary path never matches it), which is right - it isn't a snap
+confinement problem this time - but that also means it does nothing
+*for* this user, and the crash remains.
+
+**Root cause:** `error_code=1002` on Linux almost always means the same
+thing regardless of who packaged the browser: a utility process -
+including the GPU process - failed to set up its own sandbox at launch.
+Since Ubuntu 23.10 (default from 24.04 LTS onward),
+`kernel.apparmor_restrict_unprivileged_userns=1` blocks the *unprivileged
+user namespace* sandbox Chromium uses by default on modern kernels,
+**unless** the exact binary being launched has a matching AppArmor
+profile explicitly granting it `userns` - see
+`chromium.googlesource.com/.../apparmor-userns-restrictions.md`, which
+Chromium's own zygote-launch failure message links to directly. Recent
+official Google Chrome `.deb` builds ship such a profile in their
+postinst; a plain distro `chromium`/`chromium-browser` package,
+especially on an older release stream, older Chrome build, or PPA,
+frequently does not - and unlike §12, there's no path-prefix trick to
+detect this in advance, since it depends on packaging details a resolved
+binary path alone doesn't reveal. (§12 and this section are two
+different browsers hitting the same visible symptom for two unrelated
+reasons - worth keeping both fixes, since either can be the one that
+actually applies on a given machine.)
+
+**The fix:** `embed-chrome.sh`'s `CHROME_ARGS` now always includes
+`--disable-gpu-sandbox` - the specific, narrow mitigation Chromium's own
+engineers recommend first when triaging this exact `error_code=1002` /
+"GPU process isn't usable" failure (see the upstream issue thread linked
+in the verification steps below): it drops sandboxing for the GPU
+process only, not every process (`--no-sandbox` does that, and stays
+deliberately unused here). The GPU process doesn't execute untrusted
+page script - that's the renderer process's job, and its own,
+separate sandbox is untouched by this flag - so this is a materially
+smaller concession than blanket `--no-sandbox`, while still fixing the
+crash whether the underlying cause turns out to be the AppArmor
+restriction above, a snap edge case §12's redirect didn't happen to
+catch, or some other sandbox-setup failure with the same symptom.
+
+**Files changed:** `packaging/linux/embed-chrome.sh` (`CHROME_ARGS` only).
+
+**Verification steps:**
+
+```bash
+# Check whether this is the AppArmor-userns case specifically (informational only)
+sysctl kernel.apparmor_restrict_unprivileged_userns
+# 1 on Ubuntu 23.10+/24.04+ by default = the restriction described above is active
+
+./ARKtube-x86_64.AppImage
+# Expected: no "GPU process launch failed: error_code=1002" loop, no
+# "GPU process isn't usable. Goodbye." FATAL, and the embedded Chrome
+# window survives instead of the whole embed exiting seconds after
+# reparenting.
+```
+
+Not verified end-to-end here, for the same reason as everywhere else in
+this file — no display server in this environment. What's checked is
+that `--disable-gpu-sandbox` is a real, documented Chromium flag (not a
+guess) and that it's what Chromium's own team suggests as the first
+diagnostic/mitigation step for this specific error code on
+`issues.chromium.org`, independent of what's packaging the browser.

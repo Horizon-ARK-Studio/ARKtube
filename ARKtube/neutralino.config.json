@@ -43,7 +43,7 @@
       "injectGlobals": true,
       "injectClientLibrary": true,
       "injectScript": "/resources/js/app-init.js",
-      "extendUserAgentWith": " Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;"
+      "extendUserAgentWith": " Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa (compatible)"
     },
     "browser": {
       "globalVariables": {
