@@ -1,0 +1,71 @@
+name: Build arktube_linux
+
+# Builds the native GTK3 + WebKit2GTK Linux port that lives in
+# arktube_linux/, independently of ARKtube/ and stage0.yml (the
+# Neutralino shell's own workflow, which this doesn't touch).
+#
+# All compilation happens here, in CI -- there is no prebuilt binary
+# checked into arktube_linux/ the way ../ARKtube/bin/ carries prebuilt
+# Neutralino server binaries.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "arktube_linux/**"
+      - ".github/workflows/arktube-linux.yml"
+  pull_request:
+    paths:
+      - "arktube_linux/**"
+      - ".github/workflows/arktube-linux.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build arktube_linux (x86_64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: arktube_linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libgtk-3-dev \
+            libwebkit2gtk-4.1-dev
+
+      - name: Configure
+        run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Install into staging prefix
+        run: cmake --install build --prefix "${{ github.workspace }}/arktube_linux/stage/usr"
+
+      - name: Upload build-tree artifact (binary + resources, runnable as-is)
+        uses: actions/upload-artifact@v4
+        with:
+          name: arktube_linux-x86_64
+          path: |
+            arktube_linux/build/arktube_linux
+            arktube_linux/build/resources
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload installed-prefix artifact (/usr layout)
+        uses: actions/upload-artifact@v4
+        with:
+          name: arktube_linux-x86_64-usr-prefix
+          path: arktube_linux/stage/usr
+          if-no-files-found: error
+          retention-days: 14

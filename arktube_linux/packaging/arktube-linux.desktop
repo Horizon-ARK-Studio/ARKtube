@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ARKtube
+Comment=YouTube, as a native Linux desktop app
+Exec=arktube_linux
+Icon=arktube-linux
+Categories=AudioVideo;Player;
+Terminal=false
+StartupNotify=true
