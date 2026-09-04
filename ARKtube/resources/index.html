@@ -2,26 +2,37 @@
 <html>
   <head>
     <meta charset="UTF-8">
-    <title>Neutralinojs sample app</title>
+    <title>ARKtube</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <div id="neutralinoapp">
-      <h1>Neutralinojs</h1>
-      <div id="info"></div>
-      <br/>
-      <img src="/icons/logo.gif" alt="Neutralinojs" />
-      <div>
-        <a href="#" onclick="openDocs();">Docs</a> &middot;  
-        <a href="#" onclick="openTutorial();">Video tutorial</a>
-      </div>
+    <!--
+      This page is intentionally almost empty.
+
+      In the hybrid embedding model, this Neutralino-owned webview is the
+      real, top-level OS window -- it's what owns focus, receives F11 /
+      keyboard input, and is what the window manager/taskbar sees as
+      "ARKtube". It does NOT render YouTube itself.
+
+      A separate, real Chrome process (spawned by
+      packaging/linux/embed-chrome.sh, launched from AppRun) renders
+      youtube.com/tv and is reparented as a child window on top of this
+      page, resized to fill the client area. What you see below only
+      appears briefly on startup, before Chrome's window is reparented in,
+      and again momentarily on window resize if the embed script's
+      geometry-follow loop hasn't caught up yet.
+    -->
+    <div id="arktube-embed-shell">
+      <img src="/icons/appIcon.png" alt="" id="arktube-embed-shell-icon" />
+      <div id="arktube-embed-shell-text">Starting ARKtube&hellip;</div>
     </div>
-    <!-- Neutralino.js client. This file is gitignored, 
-        because `neu update` typically downloads it.
-        Avoid copy-pasting it. 
-        -->
-    <script src="/js/neutralino.js"></script>
-    <!-- Your app's source files -->
-    <script src="/js/main.js"></script>
+    <!--
+      No manual <script> tags here for neutralino.js / app-init.js: window
+      mode's injectClientLibrary/injectGlobals/injectScript (see
+      neutralino.config.json) already inject all three into every page
+      this webview loads, including this one. Adding them again here
+      would just double-fetch and rely on app-init.js's own
+      __neutralinoAppInitialized guard to no-op the second run.
+    -->
   </body>
 </html>

@@ -47,6 +47,7 @@ fi
 echo "==> Assembling AppDir"
 install -Dm755 "${BIN_SRC}" "${APPDIR}/ARKtube"
 install -Dm755 "${PACKAGING_DIR}/AppRun" "${APPDIR}/AppRun"
+install -Dm755 "${PACKAGING_DIR}/embed-chrome.sh" "${APPDIR}/embed-chrome.sh"
 install -Dm644 "${PACKAGING_DIR}/ARKtube.desktop" "${APPDIR}/ARKtube.desktop"
 install -Dm644 "${ROOT_DIR}/resources/icons/appIcon.png" "${APPDIR}/appIcon.png"
 

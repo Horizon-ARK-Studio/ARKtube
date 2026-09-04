@@ -1,14 +1,32 @@
 /*
     app-init.js
 
-    This file is loaded via the `injectScript` window-mode config option, which means
-    it runs *inside the youtube.com page itself* (after Neutralino's globals and client
-    library have been injected), not via resources/index.html. That file is never
-    served in production because `url` in neutralino.config.json points directly at
-    an external site, bypassing documentRoot entirely.
+    Hybrid mode (current default -- see neutralino.config.json): this file is
+    injected (via the `injectScript` window-mode config option) into
+    resources/index.html, a small LOCAL page that Neutralino's own window
+    loads. youtube.com/tv itself is rendered by a completely separate, real
+    Chrome process that packaging/linux/embed-chrome.sh spawns and reparents
+    as a child of Neutralino's window, filling it visually -- but that
+    embedded Chrome window has no Neutralino/this script injected into it at
+    all. Practically, that means:
 
-    Keep this script defensive: it is running on a page we don't control, and YouTube's
-    own script may run before or after it.
+      - Neutralino.window.*, the tray, and app.exit()/close handling below
+        all still work exactly as before -- they always did control
+        Neutralino's own window, which is unchanged here.
+      - The on-screen fullscreen/Immersive Mode buttons, the devtools-shortcut
+        guard, cursor auto-hide, and the gamepad-to-keyboard remap are all
+        DOM affordances added to *this* page -- they're only visible/active
+        while this shell page is what's on screen (startup, or if
+        embed-chrome.sh falls back out of the embed entirely -- e.g. no
+        xdotool/wmctrl/xbindkeys, or a Wayland session; see that script).
+        Once Chrome is embedded on top of it, none of that DOM is visible or
+        reachable, by design -- F11/Escape/Home are instead grabbed globally
+        by embed-chrome.sh itself (see onKeyDown() below), and Immersive
+        Mode's real hardening is applied as launch-time Chrome flags by
+        AppRun / the .deb launcher, same as before.
+
+    Kept defensive throughout regardless, since injectScript still runs
+    ahead of this page's own script executing in the normal DOM order.
 */
 (function () {
     // Guard against multiple initializations (YouTube or other scripts may run this)
@@ -53,14 +71,15 @@
 
     // Neutralino.window.* only works when running in window mode -- per
     // Neutralino's own docs, "This namespace's methods will work only for
-    // the window mode." That's exactly the mode this app now runs in by
-    // default (see neutralino.config.json / docs/BUGS-CAUGHT.md ยง9 for why
-    // it moved off chrome mode), so these calls control the app's own
-    // native window directly. They're kept mode-aware here only so this
-    // script still degrades correctly if someone opts back into chrome
-    // mode (see the same doc section) -- there, there's no Neutralino
-    // -owned native window handle for it to control, and the calls
-    // silently no-op instead of erroring (see
+    // the window mode." That's this app's default mode (see
+    // neutralino.config.json), and in the hybrid setup it's Neutralino's
+    // window -- not the embedded Chrome window rendering youtube.com/tv --
+    // that these calls control, which is exactly the window
+    // packaging/linux/embed-chrome.sh keeps the embedded Chrome resized to
+    // match. They're kept mode-aware here only so this script still
+    // degrades correctly if someone opts back into plain chrome mode --
+    // there, there's no Neutralino-owned native window handle for it to
+    // control, and the calls silently no-op instead of erroring (see
     // neutralinojs/neutralinojs#751), so the standard DOM Fullscreen API
     // is used as the fallback instead.
     function isNativeWindowMode() {
@@ -88,16 +107,13 @@
 
     // --- On-screen fullscreen button -------------------------------------
     //
-    // The app now boots maximized (--start-maximized, see
-    // neutralino.config.json) rather than auto-entering true fullscreen, so
-    // the taskbar/dock stays visible until the user explicitly asks for
+    // The app boots maximized rather than auto-entering true fullscreen
+    // (see "maximize"/"fullScreen" in neutralino.config.json), so the
+    // taskbar/dock stays visible until the user explicitly asks for
     // fullscreen. This button is that explicit ask for anyone without a
-    // keyboard/remote handy. It used to double up with F11 calling the same
-    // toggleFullScreen() function; F11 now belongs to Chrome alone (see
-    // onKeyDown above), so this button is the one remaining, deliberate way
-    // this script itself drives fullscreen -- distinct from Immersive Mode
-    // below, which is a separate, persisted, higher-stakes setting rather
-    // than a plain view toggle.
+    // keyboard/remote handy -- see the note at the top of this file for why
+    // it's only reachable while this shell page (rather than the embedded
+    // Chrome window on top of it) is what's visible.
     const FULLSCREEN_BTN_ID = "arktube-fullscreen-btn";
 
     function updateFullscreenButtonVisibility() {
@@ -106,9 +122,8 @@
             return;
         }
         // document.fullscreenElement only reflects HTML5 Fullscreen API
-        // state -- the active path in chrome mode, which is this app's
-        // actual default mode. Native window mode has no equivalent DOM
-        // signal to poll cheaply, so the button is simply left visible
+        // state, which native window mode (this app's default) has no
+        // equivalent DOM signal for, so the button is simply left visible
         // there rather than guessing at native window state.
         const alreadyFullscreen = !isNativeWindowMode() && !!document.fullscreenElement;
         btn.style.display = alreadyFullscreen ? "none" : "block";
@@ -191,25 +206,20 @@
     //      whichever packaging launcher started it (see
     //      packaging/linux/build-deb.sh and packaging/linux/AppRun).
     //
-    // Why (3) can't happen immediately, from here: chrome mode's Chrome
-    // process is a separate, already-running process by the time this
-    // script executes (chrome.cpp spawns it once, with args baked in at
-    // that moment); nothing server-side re-reads its own config file
-    // mid-session. And this script deliberately can't ask Neutralino to
-    // relaunch itself with new args either -- that native call
-    // (os.execCommand, which is what Neutralino.app.restartProcess()
-    // uses under the hood) is intentionally left OFF this app's
-    // nativeAllowList in neutralino.config.json, because this script runs
-    // on youtube.com/tv's own origin, a page this app doesn't control,
-    // and giving that page arbitrary command-exec capability just to
-    // support this button would be a far bigger hole than the button is
-    // worth. So instead: this script's only job is to remember the user's
-    // choice (via Neutralino.storage, a small sandboxed key/value store --
-    // see neutralino.config.json's nativeAllowList -- NOT youtube.com's
-    // own localStorage, which this app doesn't own and could be cleared
-    // from YouTube's own settings). The packaging launcher -- a trusted,
-    // local script, not a remote page -- reads that same persisted value
-    // directly off disk and decides the real Chrome flags for the next
+    // Why (3) can't happen immediately, from here: embed-chrome.sh spawns
+    // Chrome as a separate process with args baked in at that moment
+    // (before this script even runs); nothing re-reads that mid-session.
+    // And this script deliberately can't ask Neutralino to relaunch itself
+    // with new args either -- that native call (os.execCommand, which is
+    // what Neutralino.app.restartProcess() uses under the hood) is
+    // intentionally left OFF this app's nativeAllowList in
+    // neutralino.config.json. This script's own job is only ever to
+    // remember the user's choice (via Neutralino.storage, a small
+    // sandboxed key/value store -- see neutralino.config.json's
+    // nativeAllowList). The packaging launcher (AppRun / the .deb
+    // launcher) -- a trusted, local script, not a page this app doesn't
+    // control -- reads that same persisted value directly off disk and
+    // decides the real Chrome flags to hand embed-chrome.sh for the next
     // launch. Two different layers, two different trust levels, each
     // deciding only what it's actually able to enforce.
     const IMMERSIVE_BTN_ID = "arktube-immersive-btn";
@@ -384,20 +394,25 @@
         // since a real remote's Home button has no keyboard equivalent
         // otherwise.
         //
-        // F11 is deliberately NOT handled here. Chrome mode (this app's
-        // actual default -- see neutralino.config.json) launches a real,
-        // separate Chrome/Chromium process (chrome.cpp), which already
-        // owns a native, built-in F11 fullscreen toggle of its own. This
-        // script used to *also* call toggleFullScreen() on the same
-        // keypress, which meant two independent handlers -- Chrome's
-        // native one and this injected one -- both raced to answer the
-        // same physical key. F11 is now left alone as Chrome's own,
-        // user-expected behavior. This app's own "Immersive Mode" concept
-        // (see insertImmersiveButton() below) is a deliberately separate,
-        // explicitly-triggered, persisted setting instead of being tied
-        // to a key Chrome already owns -- no more dual authority over the
-        // same input.
-        if (e.key === "Escape") {
+        // This script now runs on Neutralino's own local shell page (see
+        // resources/index.html), not on youtube.com/tv itself -- that page
+        // is rendered by a separate, real Chrome process that
+        // packaging/linux/embed-chrome.sh reparents as a child of
+        // Neutralino's window. That script also grabs F11/Escape/Home
+        // *globally* (via xbindkeys), so those keys normally never reach
+        // this page's listener at all, regardless of which window has
+        // focus -- Neutralino's own window is what reacts, not Chrome.
+        // The handling below is a fallback for the cases embed-chrome.sh
+        // itself bails out of the embed for (see its own comments: no
+        // xdotool/wmctrl/xbindkeys installed, or a Wayland session, where
+        // arbitrary window reparenting isn't possible) -- there, this
+        // shell page is the only thing left to react to these keys, so it
+        // does, using the same Neutralino.window calls the global grab
+        // would otherwise trigger via wmctrl.
+        if (e.key === "F11") {
+            e.preventDefault();
+            toggleFullScreen();
+        } else if (e.key === "Escape") {
             exitFullScreenIfActive();
         } else if (e.key === "Home") {
             e.preventDefault();
