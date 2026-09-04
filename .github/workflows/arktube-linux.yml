@@ -40,6 +40,7 @@ jobs:
             cmake \
             ninja-build \
             pkg-config \
+            dpkg-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev
 
@@ -51,6 +52,43 @@ jobs:
 
       - name: Install into staging prefix
         run: cmake --install build --prefix "${{ github.workspace }}/arktube_linux/stage/usr"
+
+      - name: Build Debian package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGE_ROOT="${{ github.workspace }}/arktube_linux/deb-root"
+          VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          PACKAGE_NAME="arktube-linux"
+          DEB_PATH="${{ github.workspace }}/arktube_linux/${PACKAGE_NAME}_${VERSION}_amd64.deb"
+
+          rm -rf "$PACKAGE_ROOT"
+          mkdir -p \
+            "$PACKAGE_ROOT/DEBIAN" \
+            "$PACKAGE_ROOT/usr"
+
+          cp -a "${{ github.workspace }}/arktube_linux/stage/usr/." \
+            "$PACKAGE_ROOT/usr/"
+
+          cat > "$PACKAGE_ROOT/DEBIAN/control" <<EOF
+          Package: ${PACKAGE_NAME}
+          Version: ${VERSION}
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Horizon ARK Studio
+          Depends: libgtk-3-0, libwebkit2gtk-4.1-0
+          Description: ARKtube native Linux client
+           Native GTK3 + WebKit2GTK Linux port of ARKtube.
+          EOF
+
+          dpkg-deb --build --root-owner-group \
+            "$PACKAGE_ROOT" \
+            "$DEB_PATH"
+
+          dpkg-deb --info "$DEB_PATH"
+          dpkg-deb --contents "$DEB_PATH"
 
       - name: Upload build-tree artifact (binary + resources, runnable as-is)
         uses: actions/upload-artifact@v4
@@ -67,5 +105,13 @@ jobs:
         with:
           name: arktube_linux-x86_64-usr-prefix
           path: arktube_linux/stage/usr
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v4
+        with:
+          name: arktube_linux-x86_64-deb
+          path: arktube_linux/arktube-linux_*.deb
           if-no-files-found: error
           retention-days: 14
