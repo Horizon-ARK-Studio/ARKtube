@@ -127,7 +127,13 @@ read -r PARENT_X PARENT_Y PARENT_W PARENT_H < <(
         | awk -F= '/^X=/{x=$2} /^Y=/{y=$2} /^WIDTH=/{w=$2} /^HEIGHT=/{h=$2} END{print x, y, w, h}'
 )
 
-CHROME_UA="Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;"
+CHROME_UA="Mozilla/5.0 (PS4; Leanback Shell) Cobalt/26.lts.0-qa (compatible)"
+# Scoped per-UID rather than a single shared /tmp/.arktube-chrome.pid:
+# the old fixed path is created by whichever user first launches ARKtube
+# and left owned by them; a later launch by a *different* user (including
+# root, e.g. via `sudo arktube` after a normal launch already ran) can
+# then fail to write it - documented in docs/bugs-caught/BUGS-CAUGHT.md §15.
+CHROME_PID_FILE="/tmp/.arktube-chrome-$(id -u).pid"
 CHROME_ARGS=(
     "--app=${YOUTUBE_URL}"
     "--user-data-dir=${CHROME_PROFILE_DIR}"
@@ -180,7 +186,7 @@ fi
 "${CHROME_BIN}" "${CHROME_ARGS[@]}" &
 CHROME_PID=$!
 log "launched ${CHROME_BIN} (pid ${CHROME_PID})"
-echo "${CHROME_PID}" > "/tmp/.arktube-chrome.pid"
+echo "${CHROME_PID}" > "${CHROME_PID_FILE}"
 
 # --- 3. Wait for Chrome's own top-level window, then reparent it --------
 CHROME_WIN=""
@@ -195,9 +201,36 @@ if [ -z "${CHROME_WIN}" ]; then
 fi
 log "found Chrome window ${CHROME_WIN}, reparenting into ${NEUTRALINO_WIN}"
 
-xdotool windowreparent "${CHROME_WIN}" "${NEUTRALINO_WIN}"
-xdotool windowmove "${CHROME_WIN}" 0 0
-xdotool windowsize "${CHROME_WIN}" "${PARENT_W:-1280}" "${PARENT_H:-720}"
+# A window that xdotool --onlyvisible has just found can still be mid-map
+# server-side (WM hints, decorations, and compositor bookkeeping settle a
+# beat after the client considers itself mapped) - reparenting into it
+# immediately is a known way to get a BadMatch back from X_ReparentWindow.
+# xdotool doesn't propagate that as a nonzero exit status (the error is
+# delivered asynchronously, after xdotool has already returned), so under
+# `set -e` this used to be silently treated as success and the script
+# carried on grabbing hotkeys and resizing a window that was never
+# actually embedded. See docs/bugs-caught/BUGS-CAUGHT.md §15.
+REPARENTED=0
+for attempt in 1 2 3; do
+    sleep 0.2
+    REPARENT_ERR="$(xdotool windowreparent "${CHROME_WIN}" "${NEUTRALINO_WIN}" 2>&1 || true)"
+    xdotool windowmove "${CHROME_WIN}" 0 0 2>/dev/null || true
+    xdotool windowsize "${CHROME_WIN}" "${PARENT_W:-1280}" "${PARENT_H:-720}" 2>/dev/null || true
+    if [ -z "${REPARENT_ERR}" ]; then
+        REPARENTED=1
+        break
+    fi
+    log "reparent attempt ${attempt} reported an X error, retrying: ${REPARENT_ERR}"
+done
+
+if [ "${REPARENTED}" = "1" ]; then
+    log "reparent succeeded"
+else
+    log "reparent never succeeded after ${attempt} attempts (X server kept" \
+        "rejecting X_ReparentWindow - see docs/bugs-caught/BUGS-CAUGHT.md" \
+        "§15); continuing with Chrome as a separate, unembedded window that" \
+        "stays synced to Neutralino's position/size instead of a true embed."
+fi
 
 # --- 4. Global hotkeys, grabbed at the root window -----------------------
 # xbindkeys uses XGrabKey, which intercepts the keypress before the X
@@ -237,7 +270,7 @@ cleanup() {
     log "cleaning up (chrome pid ${CHROME_PID}, xbindkeys pid ${XBINDKEYS_PID})"
     kill -TERM "${XBINDKEYS_PID}" 2>/dev/null || true
     kill -TERM "${CHROME_PID}" 2>/dev/null || true
-    rm -f "${XBINDKEYS_CONF}" "/tmp/.arktube-chrome.pid"
+    rm -f "${XBINDKEYS_CONF}" "${CHROME_PID_FILE}"
 }
 trap cleanup EXIT INT TERM
 

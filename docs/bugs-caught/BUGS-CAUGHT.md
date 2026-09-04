@@ -735,3 +735,119 @@ that `--disable-gpu-sandbox` is a real, documented Chromium flag (not a
 guess) and that it's what Chromium's own team suggests as the first
 diagnostic/mitigation step for this specific error code on
 `issues.chromium.org`, independent of what's packaging the browser.
+
+## 15. Three separate `embed-chrome.sh` / config bugs surfaced by one real-world `.deb` install log
+
+A user's terminal log from an installed `.deb` build (`sudo apt install
+./ARKtube-*-amd64.deb`) surfaced three distinct problems in one session.
+One of the three turned out to be stale-build noise rather than a live
+bug; the other two were real and are fixed here.
+
+```text
+** (ARKtube:194914): CRITICAL **: ... webkit_settings_set_user_agent(...):
+assertion 'WebCore::isValidUserAgentHeaderValue(userAgentString)' failed
+embed-chrome: found Chrome window 8388733, reparenting into 12582924
+X Error of failed request:  BadMatch (invalid parameter attributes)
+  Major opcode of failed request:  7 (X_ReparentWindow)
+...
+$ sudo arktube
+...
+/usr/lib/arktube/embed-chrome.sh: line 159: /tmp/.arktube-chrome.pid: Permission denied
+```
+
+**(a) The UA assertion — stale build, not a live bug.** §13 already fixed
+`modes.window.extendUserAgentWith` in `neutralino.config.json` to wrap the
+trailing marker in parentheses so it parses as a valid RFC 7231
+`product-list`. The user's installed `.deb` simply predated that fix (its
+`embed-chrome.sh` line numbers didn't match this repo's either, confirming
+an older build). No code change follows from this one - reinstalling from
+a current build resolves it. It did, however, point at a second copy of
+the same invalid string that §13 missed: `modes.chrome.args` in
+`neutralino.config.json` still passed the unparenthesized
+`; compatible;` form to `--user-agent=`. That flag goes straight to a
+real Chrome-family process rather than through WebKit's header-value
+validator, so it was never the cause of an assertion - but it's the same
+string, meant to convey the same thing, and was left inconsistent with
+the fixed one. Corrected to match: `Cobalt/26.lts.0-qa (compatible)`. The
+identical string hardcoded as `CHROME_UA` in `embed-chrome.sh` (used for
+the hybrid embed's own separately-launched Chrome process, a third
+occurrence) had the same fix applied for the same reason, and the worked
+example in `ARKtube/README.md` describing the resulting UA string was
+updated to match so it doesn't describe output that no longer exists.
+
+**(b) `BadMatch (invalid parameter attributes)` on `X_ReparentWindow`.**
+The reparent call in `embed-chrome.sh` step 3 was issued the instant
+`xdotool search --onlyvisible` first reported Chrome's window ID, with no
+settle time and no check that the request actually succeeded. A window
+can report itself mapped to `xdotool` before the X server has finished
+settling its own bookkeeping for it (WM hints, decoration reparenting by
+the window manager itself, compositor registration) - reparenting into it
+in that window is a known way to draw a `BadMatch` back from
+`X_ReparentWindow`. Worse, `xdotool` doesn't turn that into a nonzero
+exit status - the error is delivered asynchronously, generally after
+`xdotool` has already returned success - so under this script's
+`set -euo pipefail` the failure was invisible to the script itself: it
+carried on grabbing global hotkeys and running the geometry-follow loop
+against a Chrome window that was never actually reparented, leaving
+Chrome sitting on top as its own ordinary, unembedded top-level window
+instead of inside ARKtube's.
+
+**The fix:** the reparent call now runs inside a short retry loop (up to
+3 attempts, 200ms apart), capturing `xdotool`'s own stderr each time
+rather than trusting its exit status. A clean attempt (no captured
+output) is treated as success and logged as such; a failing attempt logs
+the X error text and retries. If every attempt still reports an error,
+the script logs that plainly and continues anyway with Chrome as a
+separate window whose position/size is still kept in sync with
+Neutralino's by the existing geometry-follow loop - a degraded but
+functional fallback - rather than pretending, silently, that the embed
+worked.
+
+**(c) `/tmp/.arktube-chrome.pid: Permission denied` under `sudo`.** The
+PID file the script writes to track its own Chrome child was a single
+fixed path, `/tmp/.arktube-chrome.pid`, shared across every invocation
+regardless of which user runs it. The first launch creates it owned by
+that user; a later launch by a *different* user - here, `sudo arktube`
+run right after a normal, non-root launch had already created the file -
+can then fail to open it for writing. (Running ARKtube via `sudo` at all
+is unsupported and unnecessary - Chromium itself already refuses to run
+as root without `--no-sandbox`, correctly, and `--no-sandbox` is
+deliberately not added here just to accommodate that - but the shared
+path was a latent bug on its own regardless of how it gets triggered,
+e.g. two different regular user accounts on the same shared machine.)
+
+**The fix:** the PID file path is now scoped per-UID -
+`/tmp/.arktube-chrome-$(id -u).pid` - so different users (root included)
+never contend for the same file. `cleanup()` was updated to match.
+
+**Files changed:** `packaging/linux/embed-chrome.sh` (UA string, PID file
+path, reparent retry/verification), `neutralino.config.json`
+(`modes.chrome.args`), `ARKtube/README.md` (worked-example string).
+
+**Verification steps:**
+
+```bash
+bash -n packaging/linux/embed-chrome.sh   # shell syntax
+python3 -c "import json; json.load(open('neutralino.config.json'))"  # JSON syntax
+grep -rn '; compatible;' .                # should now find nothing under ARKtube/ or docs/
+
+# Reparent hardening (needs a live X11/Xwayland display to actually
+# exercise) - launch normally and confirm the log shows either:
+#   embed-chrome: reparent succeeded
+# or, on a machine where the X server keeps rejecting it:
+#   embed-chrome: reparent never succeeded after 3 attempts (...)
+# but never a bare, unhandled "X Error of failed request: BadMatch" with
+# no corresponding log line explaining what ARKtube did about it.
+
+# PID file scoping
+arktube &          # as a normal user
+sudo arktube        # should no longer report
+                     # "/tmp/.arktube-chrome.pid: Permission denied"
+```
+
+Not verified end-to-end here, for the same reason as everywhere else in
+this file — no display server in this environment. What's checked is the
+control flow (the retry loop's success/failure branches, the per-UID path
+substitution, and that the corrected UA strings are byte-identical across
+all three occurrences) and that the corrected UA string still parses
+under the RFC 7231 grammar established in §13.

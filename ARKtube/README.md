@@ -98,7 +98,7 @@ Two fallbacks are already wired for this, in the order to try them:
    to the platform UA, it does not replace it. The resulting string is a
    genuine desktop-Linux WebKitGTK UA with TV tokens bolted onto the end
    (`Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 ... Safari/605.1.15
-   (PS4; Leanback Shell) Cobalt/26.lts.0-qa; compatible;`), not a clean
+   (PS4; Leanback Shell) Cobalt/26.lts.0-qa (compatible)`), not a clean
    Cobalt UA. Whether that's enough depends entirely on whether YouTube's
    TV-client check does a loose substring match for `Cobalt/` /
    `PlayStation` anywhere in the string, or a stricter check that's
