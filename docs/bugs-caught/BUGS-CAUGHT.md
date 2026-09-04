@@ -396,3 +396,87 @@ under which `XDG_SESSION_TYPE`/tool-availability combination, and that
 `app-init.js`'s redirect condition only ever fires once per real
 navigation (guarded the same way `__neutralinoAppInitialized` already
 guards the rest of this file against YouTube's own scripts re-running it).
+
+## 11. Wayland, take two: make the embed itself the default, not just a fallback
+
+§10's fix made Wayland *work* — it just made it work by giving up on the
+embed and using window mode's own webview instead, same as the pre-hybrid
+architecture from §9. That's a real, permanent trade-off (partial UA
+spoof only) for the one case that actually needs it: a Wayland compositor
+with no Xwayland at all. But most Wayland compositors in practice (GNOME,
+KDE, Sway and other wlroots compositors) run Xwayland alongside the
+native protocol specifically so X11 apps keep working — and `xdotool`/
+`wmctrl` speak X11, not the Wayland protocol, so they work against
+Xwayland exactly the same way they work against a real X11 server. §10's
+check (`XDG_SESSION_TYPE = wayland` ⇒ give up) never distinguished "no
+Xwayland" from "Xwayland is right there" — it treated every Wayland
+session as the rare case instead of the common one.
+
+**What changes here:**
+
+- The embed-possible check (`AppRun`, the `.deb` launcher,
+  `embed-chrome.sh`'s own safety-net copy) now tests `DISPLAY` — reachable
+  on a real X11 session *and* on Xwayland under Wayland — instead of
+  `XDG_SESSION_TYPE`, followed by an actual `xdotool getdisplaygeometry`
+  probe to confirm something is really listening on it. `--native-fallback`
+  is now reserved for the genuine no-X11-at-all case.
+- Chrome gets an explicit `--ozone-platform=x11` in `embed-chrome.sh`.
+  Without it, current Chrome defaults to its own native-Wayland ozone
+  backend under a Wayland session even with `DISPLAY` set and Xwayland
+  reachable — which would hand back a window with no X11 ID at all for
+  `xdotool` to find, silently breaking the reparent regardless of the
+  `DISPLAY` check passing.
+- Neutralino's own window has the same problem in reverse: GTK defaults
+  to a native Wayland surface under a Wayland session too, which
+  `embed-chrome.sh`'s `xdotool search --name "^ARKtube\$"` would never
+  find. `AppRun`/the `.deb` launcher now launch it with `GDK_BACKEND=x11`
+  whenever `EMBED_SUPPORTED=1`, forcing it onto the same Xwayland display
+  Chrome is about to land on. Inert on a real X11 session, where that's
+  already GDK's default backend.
+- `xwayland` was added to the `.deb`'s `Recommends` alongside
+  `xdotool`/`wmctrl`/`xbindkeys`, for the (increasingly rare, but real)
+  minimal-install case where it isn't already pulled in by the desktop
+  environment.
+
+**What doesn't change:** actual Wayland-protocol reparenting is still
+impossible, full stop — that's a deliberate Wayland design decision, not
+a gap this works around. This isn't reparenting over Wayland; it's both
+apps agreeing to speak X11 to the same Xwayland server instead, same as
+how Firefox/Chrome themselves silently ran under Xwayland by default for
+years before their own native-Wayland ozone/GTK backends matured. Runs
+with genuinely no Xwayland present still take the §10 native-fallback
+path, unchanged.
+
+**Files changed:** `packaging/linux/embed-chrome.sh` (DISPLAY check +
+connectivity probe, `--ozone-platform=x11`), `packaging/linux/AppRun`,
+`packaging/linux/build-deb.sh` (same detection + `GDK_BACKEND=x11`,
+`xwayland` added to `Recommends`).
+
+**Verification steps:**
+
+```bash
+# GNOME/KDE Wayland session with Xwayland present (the common case)
+echo $XDG_SESSION_TYPE   # "wayland"
+echo $DISPLAY             # should be set (e.g. ":0" or ":1") - Xwayland's rootless display
+./ARKtube-x86_64.AppImage
+# Expected: NO "hybrid Chrome embed unavailable" line. embed-chrome.sh's
+# own log lines (waiting for window, launching Chrome, reparenting)
+# should appear exactly as they do on a real X11 session, and the app
+# should look identical - full Leanback UA, F11/Escape/Home grabbed
+# globally, no visible difference from §9's original X11 behavior.
+
+# Wayland with no Xwayland (minimal Sway install, `xwayland` package
+# removed/disabled) - the one case that still needs §10's fallback
+sudo apt remove xwayland   # or the equivalent for your compositor
+echo $DISPLAY              # empty
+./ARKtube-x86_64.AppImage
+# Expected: "hybrid Chrome embed unavailable (no X11 display/Xwayland...)"
+# and YouTube loads directly in ARKtube's own (native Wayland) webview,
+# same as §10.
+```
+
+Not verified end-to-end here, for the same reason as everywhere else in
+this file — no display server in this environment. What's checked is the
+control flow and that `DISPLAY`/`xdotool getdisplaygeometry` is a
+correct, standard way to detect "an X11 display (real or Xwayland) is
+reachable" independent of `XDG_SESSION_TYPE`.

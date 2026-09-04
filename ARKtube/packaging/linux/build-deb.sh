@@ -109,12 +109,15 @@ fi
 
 # --- Decide, up front, whether the X11 hybrid embed is even possible -----
 # See packaging/linux/AppRun for the full explanation and
-# docs/bugs-caught/BUGS-CAUGHT.md §10. xdotool/wmctrl/xbindkeys are only
+# docs/bugs-caught/BUGS-CAUGHT.md §11. xdotool/wmctrl/xbindkeys are only
 # Recommends (not Depends) on this package precisely so a Wayland-only
 # desktop isn't forced to install X11 tooling it will never use - so this
-# check still has to happen at runtime, not just at install time.
+# check still has to happen at runtime, not just at install time. This
+# checks DISPLAY (works for both a real X11 session and Xwayland under
+# Wayland), not XDG_SESSION_TYPE - the embed is the default on Wayland
+# too now, as long as Xwayland is actually running.
 EMBED_SUPPORTED=1
-if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+if [ -z "${DISPLAY:-}" ]; then
     EMBED_SUPPORTED=0
 fi
 if [ "${EMBED_SUPPORTED}" = "1" ]; then
@@ -124,6 +127,9 @@ if [ "${EMBED_SUPPORTED}" = "1" ]; then
             break
         fi
     done
+fi
+if [ "${EMBED_SUPPORTED}" = "1" ] && ! xdotool getdisplaygeometry >/dev/null 2>&1; then
+    EMBED_SUPPORTED=0
 fi
 if [ "${EMBED_SUPPORTED}" = "1" ]; then
     EMBED_SUPPORTED=0
@@ -136,14 +142,22 @@ if [ "${EMBED_SUPPORTED}" = "1" ]; then
 fi
 
 NEUTRALINO_EXTRA_ARGS=()
+NEUTRALINO_ENV=()
 if [ "${EMBED_SUPPORTED}" = "0" ]; then
-    echo "ARKtube: hybrid Chrome embed unavailable (Wayland session, or" \
-         "missing xdotool/wmctrl/xbindkeys/Chrome) - loading YouTube" \
+    echo "ARKtube: hybrid Chrome embed unavailable (no X11 display/Xwayland," \
+         "or missing xdotool/wmctrl/xbindkeys/Chrome) - loading YouTube" \
          "directly in ARKtube's own webview instead." >&2
     NEUTRALINO_EXTRA_ARGS+=(--native-fallback)
+else
+    # Puts Neutralino's own GTK/WebKitGTK window on the same Xwayland
+    # display embed-chrome.sh is about to force Chrome onto
+    # (--ozone-platform=x11 there) - see that script's header for why
+    # both halves need to land on the same X11 display for xdotool to
+    # find and reparent them. No-op on a real X11 session.
+    NEUTRALINO_ENV+=(GDK_BACKEND=x11)
 fi
 
-/usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "${NEUTRALINO_EXTRA_ARGS[@]}" "$@" &
+env "${NEUTRALINO_ENV[@]}" /usr/lib/arktube/ARKtube --path="${ARKTUBE_DATA_DIR}" "${NEUTRALINO_EXTRA_ARGS[@]}" "$@" &
 NEUTRALINO_PID=$!
 
 EMBED_PID=""
@@ -183,7 +197,7 @@ Priority: optional
 Architecture: ${ARCH}
 Installed-Size: ${INSTALLED_SIZE_KB}
 Depends: libwebkit2gtk-4.1-0
-Recommends: xdotool, wmctrl, xbindkeys
+Recommends: xdotool, wmctrl, xbindkeys, xwayland
 Maintainer: Horizon ARK Studio
 Description: YouTube, as a desktop app.
  A lightweight YouTube desktop client built with Neutralinojs.

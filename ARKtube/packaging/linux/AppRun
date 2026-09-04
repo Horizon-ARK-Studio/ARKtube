@@ -125,14 +125,24 @@ fi
 # Mirrors embed-chrome.sh's own checks (kept there too, as a safety net
 # for anyone invoking it directly), but runs *before* Neutralino's window
 # opens rather than after, because the answer changes what we launch
-# Neutralino with. Without this, a Wayland session (or a missing
+# Neutralino with. Without this, a missing X11 display (or missing
 # xdotool/wmctrl/xbindkeys/Chrome) used to mean embed-chrome.sh quietly
 # gave up *after* Neutralino was already showing the local shell page --
 # which nothing then told to do anything else, so the app just sat on
 # "Starting ARKtube..." forever with no YouTube ever loading. See
 # docs/bugs-caught/BUGS-CAUGHT.md §10.
+#
+# This deliberately checks DISPLAY, not XDG_SESSION_TYPE. A Wayland
+# session almost always still runs Xwayland (a real X11 server) alongside
+# it, which is more than enough for xdotool/wmctrl-based reparenting to
+# work exactly the same as on a real X11 session - see embed-chrome.sh's
+# header and docs/bugs-caught/BUGS-CAUGHT.md §11 for the full story on
+# why the embed is the default on Wayland now too, not just a same-only
+# fallback. EMBED_SUPPORTED=0 here means there is genuinely no X11
+# display at all - a pure Wayland compositor with Xwayland missing or
+# disabled - which is the one case this approach can't cover.
 EMBED_SUPPORTED=1
-if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+if [ -z "${DISPLAY:-}" ]; then
     EMBED_SUPPORTED=0
 fi
 if [ "${EMBED_SUPPORTED}" = "1" ]; then
@@ -142,6 +152,9 @@ if [ "${EMBED_SUPPORTED}" = "1" ]; then
             break
         fi
     done
+fi
+if [ "${EMBED_SUPPORTED}" = "1" ] && ! xdotool getdisplaygeometry >/dev/null 2>&1; then
+    EMBED_SUPPORTED=0
 fi
 if [ "${EMBED_SUPPORTED}" = "1" ]; then
     EMBED_SUPPORTED=0
@@ -154,18 +167,29 @@ if [ "${EMBED_SUPPORTED}" = "1" ]; then
 fi
 
 NEUTRALINO_EXTRA_ARGS=()
+NEUTRALINO_ENV=()
 if [ "${EMBED_SUPPORTED}" = "0" ]; then
-    echo "ARKtube: hybrid Chrome embed unavailable (Wayland session, or" \
-         "missing xdotool/wmctrl/xbindkeys/Chrome) - loading YouTube" \
+    echo "ARKtube: hybrid Chrome embed unavailable (no X11 display/Xwayland," \
+         "or missing xdotool/wmctrl/xbindkeys/Chrome) - loading YouTube" \
          "directly in ARKtube's own webview instead." >&2
     # Picked up by resources/js/app-init.js via NL_ARGS (injectGlobals) --
     # tells it to redirect this webview straight to youtube.com/tv instead
     # of sitting on the local shell page with nothing else to render it.
     NEUTRALINO_EXTRA_ARGS+=(--native-fallback)
+else
+    # Neutralino's GTK/WebKitGTK window would otherwise run as a native
+    # Wayland client under a Wayland session (no X11 window ID at all),
+    # which embed-chrome.sh's xdotool search for it by title could never
+    # find. Forcing GDK_BACKEND=x11 puts it on the same Xwayland display
+    # Chrome is about to be forced onto below (--ozone-platform=x11 in
+    # embed-chrome.sh), so both halves of the embed are reparentable X11
+    # windows regardless of the session type underneath. A no-op on a
+    # real X11 session, since that's already GDK's default backend there.
+    NEUTRALINO_ENV+=(GDK_BACKEND=x11)
 fi
 
 # --- Launch Neutralino (the real, WM-managed window) ---------------------
-"${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "${NEUTRALINO_EXTRA_ARGS[@]}" "$@" &
+env "${NEUTRALINO_ENV[@]}" "${HERE}/ARKtube" --path="${ARKTUBE_DATA_DIR}" "${NEUTRALINO_EXTRA_ARGS[@]}" "$@" &
 NEUTRALINO_PID=$!
 
 # --- Launch and embed Chrome inside it (X11 only; see EMBED_SUPPORTED) ---

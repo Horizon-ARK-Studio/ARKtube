@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# embed-chrome.sh - hybrid window/chrome mode for ARKtube (X11 only).
+# embed-chrome.sh - hybrid window/chrome mode for ARKtube (X11 protocol,
+# via either a real X11 session or Xwayland under Wayland).
 #
-# Neutralino now runs in plain "window" mode (see neutralino.config.json)
-# and owns the real, top-level, window-manager-managed OS window. It loads
+# Neutralino runs in plain "window" mode (see neutralino.config.json) and
+# owns the real, top-level, window-manager-managed OS window. It loads
 # nothing but a small local backdrop page (resources/index.html) -
 # YouTube itself is rendered by a real, separately-spawned Chrome process,
 # which this script reparents as an X11 *child* of Neutralino's window and
@@ -19,19 +20,39 @@
 # against Neutralino's own window below, unconditionally, regardless of
 # which window currently has input focus.
 #
-# Requires (X11 desktop only - this cannot work on Wayland, which does not
-# allow one client to reparent another client's window): xdotool, wmctrl,
-# xbindkeys, plus a Chrome/Chromium binary.
+# Wayland itself still does not allow one client to reparent another
+# client's window - that part hasn't changed, and can't. What *has*
+# changed (see docs/bugs-caught/BUGS-CAUGHT.md §11) is that this no
+# longer means giving up on the embed the moment `XDG_SESSION_TYPE` says
+# "wayland". Nearly every Wayland compositor in practice (GNOME, KDE,
+# Sway/wlroots, ...) also runs Xwayland, a real X11 server that both
+# Neutralino's own GTK/WebKitGTK window and a separately-launched Chrome
+# can be forced onto with plain X11-app environment variables/flags -
+# neither app needs to know or care that the session underneath is
+# Wayland once they're both talking X11 to the same Xwayland server. This
+# script (and AppRun / the .deb launcher, which launch Neutralino itself)
+# force that, so the *same* xdotool-based reparenting below works
+# unmodified regardless of session type - the only question that matters
+# is whether an X11 display (real or Xwayland) is actually reachable.
 #
-# AppRun / the .deb launcher now run this exact same set of checks
-# *before* even launching Neutralino, and skip invoking this script
-# entirely when any of them fail - passing Neutralino a --native-fallback
-# argument instead, so resources/js/app-init.js loads YouTube directly in
-# Neutralino's own webview (see docs/bugs-caught/BUGS-CAUGHT.md §10). The
-# checks below are kept as a safety net for anyone invoking this script
-# directly, but in the normal launch path they're redundant by design -
-# if you're reading this because the app is stuck on the local shell page
-# instead of falling back, the bug is in the caller's pre-check, not here.
+# Requires: xdotool, wmctrl, xbindkeys, a Chrome/Chromium binary, and a
+# reachable X11 display - `DISPLAY` set to a real X11 server, or to
+# Xwayland's rootless display under a Wayland session (nearly universal;
+# see the DISPLAY check below for the one case - pure Wayland with no
+# Xwayland at all, e.g. a minimal Sway install without the `xwayland`
+# package - where this genuinely can't work).
+#
+# AppRun / the .deb launcher run this exact same set of checks *before*
+# even launching Neutralino, force `GDK_BACKEND=x11` on it so it lands on
+# the same Xwayland display this script targets, and skip invoking this
+# script entirely when any of the checks fail - passing Neutralino a
+# --native-fallback argument instead, so resources/js/app-init.js loads
+# YouTube directly in Neutralino's own (then genuinely native-Wayland)
+# webview as a last resort. The checks below are kept as a safety net for
+# anyone invoking this script directly, but in the normal launch path
+# they're redundant by design - if you're reading this because the app is
+# stuck on the local shell page instead of embedding, the bug is in the
+# caller's pre-check, not here.
 #
 # Usage:
 #   embed-chrome.sh <neutralino-window-title> <youtube-url> <chrome-profile-dir> [--immersive]
@@ -45,11 +66,13 @@ IMMERSIVE="${4:-}"
 
 log() { echo "embed-chrome: $*" >&2; }
 
-if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
-    log "Wayland session detected - arbitrary window reparenting isn't" \
-        "permitted here. Falling back to plain window mode; ARKtube will" \
-        "keep running with its own webview loading the local shell page" \
-        "only. Run under Xwayland/X11 for the hybrid embed."
+if [ -z "${DISPLAY:-}" ]; then
+    log "no X11 DISPLAY set (no Xwayland running under this Wayland" \
+        "session, and no X11 session either) - arbitrary window" \
+        "reparenting isn't possible without one. Falling back to plain" \
+        "window mode. Install/enable Xwayland (most compositors ship it" \
+        "as an optional package, e.g. 'xwayland' on most distros) to" \
+        "get the hybrid embed here too."
     exit 0
 fi
 
@@ -60,6 +83,12 @@ for tool in xdotool wmctrl xbindkeys; do
         exit 0
     fi
 done
+
+if ! xdotool getdisplaygeometry >/dev/null 2>&1; then
+    log "DISPLAY=${DISPLAY} is set but not answering (Xwayland not" \
+        "actually running?) - falling back to plain window mode."
+    exit 0
+fi
 
 CHROME_BIN=""
 for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
@@ -103,6 +132,13 @@ CHROME_ARGS=(
     "--app=${YOUTUBE_URL}"
     "--user-data-dir=${CHROME_PROFILE_DIR}"
     "--user-agent=${CHROME_UA}"
+    # Modern Chrome defaults to its native-Wayland ozone backend under a
+    # Wayland session even when DISPLAY/Xwayland is available, which
+    # would produce a window with no X11 ID for xdotool below to find at
+    # all. Forcing x11 here is what actually makes this script's approach
+    # work on Wayland, not just on a real X11 session (see the top of
+    # this file and docs/bugs-caught/BUGS-CAUGHT.md §11).
+    "--ozone-platform=x11"
     "--window-position=0,0"
     "--window-size=${PARENT_W:-1280},${PARENT_H:-720}"
     "--no-first-run"
