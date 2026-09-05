@@ -34,6 +34,7 @@
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
 
+#include "layer_shell.h"
 #include "output.h"
 #include "server.h"
 #include "view.h"
@@ -179,6 +180,7 @@ handle_output_layout_change(struct wl_listener *listener, void *data)
 	struct cg_server *server = wl_container_of(listener, server, output_layout_change);
 
 	view_position_all(server);
+	layer_shell_arrange(server, NULL);
 	update_output_manager_config(server);
 }
 

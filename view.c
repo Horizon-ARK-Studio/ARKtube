@@ -147,7 +147,11 @@ handle_surface_request_close(struct wl_listener *listener, void *data)
 void
 view_map(struct cg_view *view, struct wlr_surface *surface)
 {
-	view->scene_tree = wlr_scene_subsurface_tree_create(&view->server->scene->tree, surface);
+	/* Parented into shell_layer_tree, not scene->tree directly, so
+	 * views always sit strictly between the layer-shell's "bottom" and
+	 * "top" layers regardless of creation order -- see server.h's
+	 * comment on the layer scene trees and layer_shell.c. */
+	view->scene_tree = wlr_scene_subsurface_tree_create(view->server->shell_layer_tree, surface);
 	if (!view->scene_tree)
 		goto fail;
 	view->scene_tree->node.data = view;

@@ -10,7 +10,6 @@
 
 #include "config.h"
 
-#include <assert.h>
 #include <linux/input-event-codes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +22,7 @@
 #include <wlr/types/wlr_data_device.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_keyboard_group.h>
+#include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_scene.h>
@@ -37,6 +37,7 @@
 #endif
 
 #include "output.h"
+#include "layer_shell.h"
 #include "seat.h"
 #include "server.h"
 #include "view.h"
@@ -52,14 +53,18 @@ static void drag_icon_update_position(struct cg_drag_icon *drag_icon);
  * surface pointer to that wlr_surface and the sx and sy coordinates to the
  * coordinates relative to that surface's top-left corner.
  *
- * This function iterates over all of our surfaces and attempts to find one
- * under the cursor. If desktop_view_at returns a view, there is also a
- * surface. There cannot be a surface without a view, either. It's both or
- * nothing.
+ * This walks the whole scene graph, so it finds layer-shell surfaces
+ * (session/overlay, once ported to gtk-layer-shell -- see layer_shell.c)
+ * just as readily as it finds a view's surface. *view_out is populated
+ * only when the surface found belongs to a cg_view; it is left NULL for
+ * a layer-shell surface, which callers must check for explicitly rather
+ * than assume can't happen.
  */
-static struct cg_view *
-desktop_view_at(struct cg_server *server, double lx, double ly, struct wlr_surface **surface, double *sx, double *sy)
+static struct wlr_surface *
+desktop_surface_at(struct cg_server *server, double lx, double ly, double *sx, double *sy, struct cg_view **view_out)
 {
+	*view_out = NULL;
+
 	struct wlr_scene_node *node = wlr_scene_node_at(&server->scene->tree.node, lx, ly, sx, sy);
 	if (node == NULL || node->type != WLR_SCENE_NODE_BUFFER) {
 		return NULL;
@@ -71,21 +76,25 @@ desktop_view_at(struct cg_server *server, double lx, double ly, struct wlr_surfa
 		return NULL;
 	}
 
-	*surface = scene_surface->surface;
+	struct wlr_surface *surface = scene_surface->surface;
 
-	/* Walk up the tree until we find a node with a data pointer. When done,
-	 * we've found the node representing the view. */
-	while (!node->data) {
-		if (!node->parent) {
-			node = NULL;
-			break;
-		}
-
-		node = &node->parent->node;
+	/* Walk up the tree until we find a node with a data pointer, which
+	 * means we've found the node representing a view. Layer-shell
+	 * surfaces deliberately never set node->data (see layer_shell.c),
+	 * so for those this walk bottoms out at the scene root with node
+	 * == NULL -- that used to be an assert()-if-unreached here, back
+	 * when every visible pixel necessarily belonged to some view. That
+	 * stopped being true the moment a layer-shell surface could be
+	 * on-screen, so this now just leaves *view_out at NULL instead of
+	 * aborting the compositor. */
+	while (node && !node->data) {
+		node = node->parent ? &node->parent->node : NULL;
 	}
 
-	assert(node != NULL);
-	return node->data;
+	if (node) {
+		*view_out = node->data;
+	}
+	return surface;
 }
 
 static void
@@ -96,17 +105,27 @@ press_cursor_button(struct cg_seat *seat, struct wlr_input_device *device, uint3
 
 	if (state == WLR_BUTTON_PRESSED) {
 		double sx, sy;
-		struct wlr_surface *surface;
-		struct cg_view *view = desktop_view_at(server, lx, ly, &surface, &sx, &sy);
-		struct cg_view *current = seat_get_focus(seat);
-		if (view == current) {
+		struct cg_view *view = NULL;
+		struct wlr_surface *surface = desktop_surface_at(server, lx, ly, &sx, &sy, &view);
+
+		if (view) {
+			struct cg_view *current = seat_get_focus(seat);
+			/* Focus that client if the button was pressed and
+			   it has no open dialogs. */
+			if (view != current && !view_is_transient_for(current, view)) {
+				seat_set_focus(seat, view);
+			}
 			return;
 		}
 
-		/* Focus that client if the button was pressed and
-		   it has no open dialogs. */
-		if (view && !view_is_transient_for(current, view)) {
-			seat_set_focus(seat, view);
+		/* Not a view. If it's a layer-shell surface asking for
+		 * click-to-focus keyboard interactivity ("on_demand" in the
+		 * protocol), give it real Wayland keyboard focus directly --
+		 * see layer_shell.c for why this is kept separate from
+		 * seat_set_focus()/seat_get_focus(), which only know about
+		 * views. */
+		if (surface) {
+			layer_shell_handle_pointer_press(server, surface);
 		}
 	}
 }
@@ -532,11 +551,12 @@ handle_touch_down(struct wl_listener *listener, void *data)
 	wlr_cursor_absolute_to_layout_coords(seat->cursor, &event->touch->base, event->x, event->y, &lx, &ly);
 
 	double sx, sy;
-	struct wlr_surface *surface;
-	struct cg_view *view = desktop_view_at(seat->server, lx, ly, &surface, &sx, &sy);
+	struct cg_view *view = NULL;
+	struct wlr_surface *surface = desktop_surface_at(seat->server, lx, ly, &sx, &sy, &view);
+	(void) view;
 
 	uint32_t serial = 0;
-	if (view) {
+	if (surface) {
 		serial = wlr_seat_touch_notify_down(seat->seat, surface, event->time_msec, event->touch_id, sx, sy);
 	}
 
@@ -583,10 +603,11 @@ handle_touch_motion(struct wl_listener *listener, void *data)
 	wlr_cursor_absolute_to_layout_coords(seat->cursor, &event->touch->base, event->x, event->y, &lx, &ly);
 
 	double sx, sy;
-	struct wlr_surface *surface;
-	struct cg_view *view = desktop_view_at(seat->server, lx, ly, &surface, &sx, &sy);
+	struct cg_view *view = NULL;
+	struct wlr_surface *surface = desktop_surface_at(seat->server, lx, ly, &sx, &sy, &view);
+	(void) view;
 
-	if (view) {
+	if (surface) {
 		wlr_seat_touch_point_focus(seat->seat, surface, event->time_msec, event->touch_id, sx, sy);
 		wlr_seat_touch_notify_motion(seat->seat, event->time_msec, event->touch_id, sx, sy);
 	} else {
@@ -648,10 +669,11 @@ process_cursor_motion(struct cg_seat *seat, uint32_t time_msec, double dx, doubl
 {
 	double sx, sy;
 	struct wlr_seat *wlr_seat = seat->seat;
-	struct wlr_surface *surface = NULL;
+	struct cg_view *view = NULL;
+	struct wlr_surface *surface = desktop_surface_at(seat->server, seat->cursor->x, seat->cursor->y, &sx, &sy, &view);
+	(void) view; /* only used to distinguish view vs. layer-shell surfaces on click, not here */
 
-	struct cg_view *view = desktop_view_at(seat->server, seat->cursor->x, seat->cursor->y, &surface, &sx, &sy);
-	if (!view) {
+	if (!surface) {
 		wlr_seat_pointer_clear_focus(wlr_seat);
 	} else {
 		wlr_seat_pointer_notify_enter(wlr_seat, surface, sx, sy);

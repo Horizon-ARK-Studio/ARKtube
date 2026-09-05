@@ -44,6 +44,38 @@ math           = cc.find_library('m')
 
 have_xwayland = wlroots.get_variable(pkgconfig: 'have_xwayland', internal: 'have_xwayland') == 'true'
 
+# wlr-layer-shell-unstable-v1: wlroots' own wlr_layer_shell_v1.h includes a
+# generated "wlr-layer-shell-unstable-v1-protocol.h" that its -dev package
+# does not actually install (confirmed against Ubuntu Noble's
+# libwlroots-dev, whose pkg-config Cflags only exposes ${includedir} —
+# nothing protocol-generated). wlroots expects consumers of unstable
+# protocols to generate that header themselves from the upstream XML, the
+# same way sway/dwl/labwc each vendor it rather than assume it's installed.
+# The XML itself (protocol/wlr-layer-shell-unstable-v1.xml, vendored in
+# this tree) is byte-for-byte from swaywm/wlr-protocols@master, the same
+# copy wlroots itself builds against.
+wayland_scanner_dep = dependency('wayland-scanner', native: true)
+wayland_scanner = find_program(
+  wayland_scanner_dep.get_variable(pkgconfig: 'wayland_scanner'),
+  native: true,
+)
+
+layer_shell_xml = join_paths(meson.current_source_dir(), 'protocol', 'wlr-layer-shell-unstable-v1.xml')
+
+layer_shell_server_header = custom_target(
+  'wlr-layer-shell-unstable-v1-protocol.h',
+  input: layer_shell_xml,
+  output: 'wlr-layer-shell-unstable-v1-protocol.h',
+  command: [wayland_scanner, 'server-header', '@INPUT@', '@OUTPUT@'],
+)
+
+layer_shell_protocol_code = custom_target(
+  'wlr-layer-shell-unstable-v1-protocol.c',
+  input: layer_shell_xml,
+  output: 'wlr-layer-shell-unstable-v1-protocol.c',
+  command: [wayland_scanner, 'private-code', '@INPUT@', '@OUTPUT@'],
+)
+
 version = '@0@'.format(meson.project_version())
 if fs.is_dir('.git')
   git = find_program('git', native: true, required: false)
@@ -93,10 +125,13 @@ endif
 cage_sources = [
   'cage.c',
   'idle_inhibit_v1.c',
+  'layer_shell.c',
   'output.c',
   'seat.c',
   'view.c',
   'xdg_shell.c',
+  layer_shell_server_header,
+  layer_shell_protocol_code,
   configure_file(input: 'config.h.in',
                  output: 'config.h',
                  configuration: conf_data),

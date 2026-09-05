@@ -53,6 +53,7 @@
 #endif
 
 #include "idle_inhibit_v1.h"
+#include "layer_shell.h"
 #include "output.h"
 #include "seat.h"
 #include "server.h"
@@ -401,6 +402,35 @@ main(int argc, char *argv[])
 	}
 
 	server.scene_output_layout = wlr_scene_attach_output_layout(server.scene, server.output_layout);
+
+	/* wlr-layer-shell-v1 z-order, background-to-foreground, matching
+	 * the protocol's own ordering. Created once, never reordered
+	 * relative to each other; regular toplevel views are parented into
+	 * shell_layer_tree (see view.c's view_map()), which keeps them
+	 * strictly between "bottom" and "top" no matter what order views
+	 * and layer surfaces are created in. See server.h and
+	 * layer_shell.c/.h for the rest of this. */
+	server.layer_bg_tree = wlr_scene_tree_create(&server.scene->tree);
+	server.layer_bottom_tree = wlr_scene_tree_create(&server.scene->tree);
+	server.shell_layer_tree = wlr_scene_tree_create(&server.scene->tree);
+	server.layer_top_tree = wlr_scene_tree_create(&server.scene->tree);
+	server.layer_overlay_tree = wlr_scene_tree_create(&server.scene->tree);
+	if (!server.layer_bg_tree || !server.layer_bottom_tree || !server.shell_layer_tree ||
+	    !server.layer_top_tree || !server.layer_overlay_tree) {
+		wlr_log(WLR_ERROR, "Unable to create layer-shell scene trees");
+		ret = 1;
+		goto end;
+	}
+
+	wl_list_init(&server.layer_surfaces);
+	server.layer_shell_v1 = wlr_layer_shell_v1_create(server.wl_display, 4);
+	if (!server.layer_shell_v1) {
+		wlr_log(WLR_ERROR, "Unable to create the layer shell interface");
+		ret = 1;
+		goto end;
+	}
+	server.new_layer_surface.notify = handle_new_layer_shell_surface;
+	wl_signal_add(&server.layer_shell_v1->events.new_surface, &server.new_layer_surface);
 
 	struct wlr_compositor *compositor = wlr_compositor_create(server.wl_display, 6, server.renderer);
 	if (!compositor) {

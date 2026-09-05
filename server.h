@@ -8,6 +8,7 @@
 #include <wlr/types/wlr_drm_lease_v1.h>
 #include <wlr/types/wlr_idle_inhibit_v1.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
+#include <wlr/types/wlr_layer_shell_v1.h>
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
@@ -51,6 +52,29 @@ struct cg_server {
 	struct wl_listener xdg_toplevel_decoration;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_xdg_popup;
+
+	/* wlr-layer-shell-v1: see layer_shell.c/.h. Five scene sub-trees
+	 * under server->scene->tree, created once at startup and never
+	 * reordered relative to each other, so that regular toplevel
+	 * views (parented into shell_layer_tree, not scene->tree
+	 * directly -- see view_map()'s single changed line) are always
+	 * z-ordered strictly between the layer-shell's "bottom" and "top"
+	 * layers, matching the wlr-layer-shell-v1 protocol's own layer
+	 * ordering (background < bottom < shell surfaces < top <
+	 * overlay). Cage has exactly one primary shell surface in
+	 * practice (ARKtube), so this is deliberately simpler than a
+	 * general-purpose WM's layer handling: see layer_shell.c's own
+	 * header comment for what's scoped out (multi-output arrangement,
+	 * exclusive-zone enforcement against the primary view) and why. */
+	struct wlr_scene_tree *layer_bg_tree;
+	struct wlr_scene_tree *layer_bottom_tree;
+	struct wlr_scene_tree *shell_layer_tree;
+	struct wlr_scene_tree *layer_top_tree;
+	struct wlr_scene_tree *layer_overlay_tree;
+
+	struct wlr_layer_shell_v1 *layer_shell_v1;
+	struct wl_listener new_layer_surface;
+	struct wl_list layer_surfaces; // cg_layer_surface::link
 
 	struct wl_listener new_virtual_keyboard;
 	struct wl_listener new_virtual_pointer;
