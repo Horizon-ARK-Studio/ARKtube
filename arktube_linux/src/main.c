@@ -381,11 +381,18 @@ static gboolean arktube_window_is_fullscreen(GtkWidget *window) {
        this build of the page doesn't bind it. */
 static void arktube_remap_remote_keyval(GdkEventKey *event) {
     switch (event->keyval) {
-        case GDK_KEY_XF86HomePage:
+        /* GTK/GDK generates these two off whatever X11/XF86keysym.h the
+           system had at GDK-build time, so the identifier isn't always
+           the "GDK_KEY_XF86*" name docs/older code samples use --
+           confirmed against this project's actual target (Ubuntu 24.04's
+           libgtk-3-dev, gdk/gdkkeysyms.h) where the generated defines
+           are plain GDK_KEY_HomePage / GDK_KEY_Search, no XF86 prefix,
+           for the same 0x1008ff18 / 0x1008ff1b keysyms. */
+        case GDK_KEY_HomePage:
             event->keyval = GDK_KEY_Home;
             break;
 
-        case GDK_KEY_XF86Search:
+        case GDK_KEY_Search:
             event->keyval = GDK_KEY_slash;
             break;
 
