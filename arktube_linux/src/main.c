@@ -47,8 +47,15 @@
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #define ARKTUBE_APP_ID "com.arktube.linux"
@@ -91,23 +98,47 @@
    reason (a stalled resource, a WebKit quirk), the splash is dismissed
    anyway after this long rather than sitting on screen forever. */
 #define ARKTUBE_SPLASH_MAX_WAIT_MS 20000
-#define ARKTUBE_SPLASH_WIDTH 860
 
-/* boot-logo.png is a fixed 1672x941 piece of artwork (the ARKtube
-   wordmark + tagline on the left, the character on the right), not a
-   small logo to float on blank space -- so the splash is the image
-   itself, edge to edge, at ARKTUBE_SPLASH_WIDTH, scaled down keeping
-   the 1672:941 aspect ratio. */
+/* boot-logo.png and no_internet.png are both a fixed 1672x941 piece of
+   artwork. Rather than scaling either down to some fixed width and
+   letter/pillar-boxing it in the middle of whatever the real window's
+   client area is, both are stretched -- non-uniformly if need be -- to
+   exactly fill it, on every resize, regardless of the window's actual
+   resolution or aspect ratio. See arktube_stretch_image_draw() below. */
 #define ARKTUBE_SPLASH_LOGO_NATIVE_WIDTH 1672
+#define ARKTUBE_SPLASH_LOGO_NATIVE_HEIGHT 941
 
 /* Where the "Youtube tv app for desktop devices" tagline actually sits
    in boot-logo.png, measured directly off the artwork's pixels (left
-   edge of the text, and its bottom edge) at native 1672x941 -- so the
-   spinner below can be pinned just under it instead of guessed. */
+   edge, right edge, and bottom edge of the text) at native 1672x941 --
+   so the spinner below can be pinned centered under it and just below
+   it, instead of guessed. Since the artwork is now stretched
+   non-uniformly to fill the window, the spinner's position is
+   recomputed from these on every resize (see
+   arktube_splash_reposition_spinner() below) using independent
+   horizontal and vertical scale factors, rather than a single shared
+   scale the way a uniformly-scaled image would only need.
+   ARKTUBE_SPLASH_SPINNER_GAP_NATIVE is the vertical gap between the
+   text's bottom edge and the spinner, kept generous enough that the
+   spinner reads as clearly separate from the tagline rather than
+   crowding it. */
 #define ARKTUBE_SPLASH_TEXT_LEFT_NATIVE 172
+#define ARKTUBE_SPLASH_TEXT_RIGHT_NATIVE 881
 #define ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE 420
-#define ARKTUBE_SPLASH_SPINNER_GAP_NATIVE 28
+#define ARKTUBE_SPLASH_SPINNER_GAP_NATIVE 46
 #define ARKTUBE_SPLASH_SPINNER_SIZE 30
+
+/* Connectivity check, done with plain BSD-socket syscalls (socket(2) /
+   connect(2) / poll(2), no libcurl or libsoup dependency) rather than
+   trying to load youtube.com/tv itself and hoping WebKit's own failure
+   mode is easy to distinguish from a slow page. A fixed IP:port (Google
+   Public DNS's TCP/53) is used instead of a hostname so a DNS
+   resolution failure -- itself just another symptom of no internet --
+   can't be confused with the connect() this is actually testing. */
+#define ARKTUBE_CONNECTIVITY_HOST "8.8.8.8"
+#define ARKTUBE_CONNECTIVITY_PORT 53
+#define ARKTUBE_CONNECTIVITY_TIMEOUT_MS 2000
+#define ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS 3000
 
 /* Persisted window state -- currently just "was the window fullscreen
    last time the app quit", read on startup and written whenever F11 or
@@ -160,6 +191,57 @@ static gchar *arktube_find_resource(const char *relative) {
     g_free(cwd_candidate);
 
     return NULL;
+}
+
+/* Internet reachability check via a raw non-blocking connect(2) to
+   ARKTUBE_CONNECTIVITY_HOST:ARKTUBE_CONNECTIVITY_PORT, bounded by
+   poll(2) so a silently-dropping network can't hang this past
+   ARKTUBE_CONNECTIVITY_TIMEOUT_MS. Deliberately just the raw BSD
+   socket syscalls (socket/fcntl/connect/poll/getsockopt/close) instead
+   of asking WebKit to load the real page and inferring the answer from
+   its failure mode -- this is meant to run in a background thread,
+   repeatedly, well before (and independently of) any WebView load.
+   Always called off the main thread (see arktube_connectivity_thread
+   below); nothing here touches GTK. */
+static gboolean arktube_check_internet_now(void) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return FALSE;
+    }
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags != -1) {
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(ARKTUBE_CONNECTIVITY_PORT);
+    if (inet_pton(AF_INET, ARKTUBE_CONNECTIVITY_HOST, &addr.sin_addr) != 1) {
+        close(sock);
+        return FALSE;
+    }
+
+    gboolean online = FALSE;
+    int rc = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+    if (rc == 0) {
+        online = TRUE;
+    } else if (errno == EINPROGRESS) {
+        struct pollfd pfd = { .fd = sock, .events = POLLOUT, .revents = 0 };
+        int pr = poll(&pfd, 1, ARKTUBE_CONNECTIVITY_TIMEOUT_MS);
+        if (pr > 0 && (pfd.revents & POLLOUT)) {
+            int so_error = 0;
+            socklen_t len = sizeof(so_error);
+            if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) == 0 &&
+                so_error == 0) {
+                online = TRUE;
+            }
+        }
+    }
+
+    close(sock);
+    return online;
 }
 
 /* Path to the persisted config file, creating its parent directory if
@@ -299,50 +381,122 @@ static void inject_user_script(WebKitUserContentManager *ucm, const char *path) 
     g_free(contents);
 }
 
-/* Splash overlay: boot-logo.png rendered edge-to-edge (no border around
-   it -- the artwork itself already frames both the wordmark and the
-   tagline) with a spinning "loading" indicator overlaid just under the
-   tagline, drawn as a full-bleed backdrop *inside* the main window
-   (layered on top of the WebView via the GtkOverlay set up in main(),
-   not as a second, separate top-level window the way this used to
-   work) so it always exactly fills and matches whatever state the real
-   window is actually in this run -- maximized, fullscreen, or a plain
-   resizable window -- instead of floating as its own small, fixed-size,
-   always-centered-on-the-screen window regardless of where or how big
-   the real window ends up. That mismatch is exactly what showed up as
-   the splash visibly not covering the app's own window: a small
-   ARKTUBE_SPLASH_WIDTH-wide box sitting in whatever position
-   GTK_WIN_POS_CENTER happened to compute before the real window had
-   even appeared, with the desktop still visible around it.
-   Returns NULL (and leaves nothing on screen) if the boot logo isn't
-   shipped this run, so packaging without it still boots straight to the
-   bare webview with no overlay at all. */
-static GtkWidget *arktube_create_splash_overlay(void) {
-    gchar *logo_path = arktube_find_resource("splash screen/boot-logo.png");
-    if (!logo_path) {
-        g_warning("ARKtube: 'splash screen/boot-logo.png' not found; "
-                  "skipping the splash screen this run.");
+/* Paints whatever GdkPixbuf was stashed on this GtkDrawingArea (see the
+   "arktube-pixbuf" g_object_set_data_full() calls below) scaled to
+   exactly the widget's current allocated size -- width and height
+   independently, so it stretches to fill the window edge to edge on
+   every resize regardless of the window's actual resolution or aspect
+   ratio, rather than the artwork's own 1672:941 ratio being preserved
+   and letter/pillar-boxed in the middle of it. Shared by both the boot
+   splash and the no-internet screen below, since both want the same
+   "cover the whole window, however big or oddly-shaped it is" artwork
+   behavior. */
+static gboolean arktube_stretch_image_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
+    (void)user_data;
+    GdkPixbuf *original = GDK_PIXBUF(g_object_get_data(G_OBJECT(widget), "arktube-pixbuf"));
+    if (!original) {
+        return FALSE;
+    }
+
+    gint width = gtk_widget_get_allocated_width(widget);
+    gint height = gtk_widget_get_allocated_height(widget);
+    if (width <= 0 || height <= 0) {
+        return FALSE;
+    }
+
+    GdkPixbuf *scaled = gdk_pixbuf_scale_simple(original, width, height, GDK_INTERP_BILINEAR);
+    if (scaled) {
+        gdk_cairo_set_source_pixbuf(cr, scaled, 0, 0);
+        cairo_paint(cr);
+        g_object_unref(scaled);
+    }
+    return FALSE;
+}
+
+/* Loads a resource PNG at its full native resolution (no scaling here --
+   arktube_stretch_image_draw() above rescales it to whatever size it's
+   actually drawn at, on every resize) and wraps it in a hexpand/vexpand
+   GtkDrawingArea that fills whatever container it's added to. Returns
+   NULL (having already warned) if the resource is missing or fails to
+   load. */
+static GtkWidget *arktube_create_stretch_image_area(const char *relative_resource_path,
+                                                     const char *missing_warning) {
+    gchar *path = arktube_find_resource(relative_resource_path);
+    if (!path) {
+        g_warning("%s", missing_warning);
         return NULL;
     }
 
     GError *error = NULL;
-    GdkPixbuf *logo = gdk_pixbuf_new_from_file_at_scale(
-        logo_path, ARKTUBE_SPLASH_WIDTH, -1, TRUE, &error);
-    g_free(logo_path);
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_file(path, &error);
+    g_free(path);
 
-    if (!logo) {
-        g_warning("ARKtube: could not load boot logo: %s",
+    if (!pixbuf) {
+        g_warning("ARKtube: could not load '%s': %s", relative_resource_path,
                   error ? error->message : "unknown error");
         g_clear_error(&error);
         return NULL;
     }
 
-    /* Full-bleed backdrop: sized to whatever the real window's client
-       area is (via hexpand/vexpand + ALIGN_FILL, once added as an
-       overlay child in main()) rather than shrink-wrapping to the logo
-       image the way the old separate splash window did -- matching the
-       old shell's #0f0f0f loading-state background so nothing behind it
-       (the WebView, still mid-load) is ever visible through the edges. */
+    GtkWidget *area = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(area, TRUE);
+    gtk_widget_set_vexpand(area, TRUE);
+    gtk_widget_set_halign(area, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(area, GTK_ALIGN_FILL);
+    /* Ownership moves to the widget: the pixbuf is unref'd automatically
+       when the drawing area is destroyed. */
+    g_object_set_data_full(G_OBJECT(area), "arktube-pixbuf", pixbuf, g_object_unref);
+    g_signal_connect(area, "draw", G_CALLBACK(arktube_stretch_image_draw), NULL);
+
+    return area;
+}
+
+/* Recomputes the spinner's position every time the stretched boot-logo
+   image is resized, using independent horizontal and vertical scale
+   factors (allocation size / native size on each axis) rather than one
+   shared scale -- because the image is no longer scaled uniformly, a
+   single shared factor would drift off the tagline as soon as the
+   window's aspect ratio stopped matching the artwork's own 1672:941. */
+static void arktube_splash_reposition_spinner(GtkWidget *widget, GdkRectangle *allocation,
+                                               gpointer user_data) {
+    (void)widget;
+    GtkWidget *spinner = GTK_WIDGET(user_data);
+
+    if (allocation->width <= 0 || allocation->height <= 0) {
+        return;
+    }
+
+    gdouble scale_x = (gdouble)allocation->width / (gdouble)ARKTUBE_SPLASH_LOGO_NATIVE_WIDTH;
+    gdouble scale_y = (gdouble)allocation->height / (gdouble)ARKTUBE_SPLASH_LOGO_NATIVE_HEIGHT;
+    gdouble text_center_native =
+        (ARKTUBE_SPLASH_TEXT_LEFT_NATIVE + ARKTUBE_SPLASH_TEXT_RIGHT_NATIVE) / 2.0;
+
+    /* Centered *on* the tagline's own midpoint, not its left edge --
+       subtracting half the spinner's fixed size is what actually
+       centers it there, rather than just starting the spinner at that
+       x-coordinate. */
+    gint margin_start = (gint)(text_center_native * scale_x) - (ARKTUBE_SPLASH_SPINNER_SIZE / 2);
+    gint margin_top = (gint)(
+        (ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE + ARKTUBE_SPLASH_SPINNER_GAP_NATIVE) * scale_y);
+
+    gtk_widget_set_margin_start(spinner, margin_start);
+    gtk_widget_set_margin_top(spinner, margin_top);
+}
+
+/* Splash overlay: boot-logo.png stretched to exactly fill the window
+   (see arktube_stretch_image_draw() above) with a spinning "loading"
+   indicator overlaid just under the tagline, drawn as a full-bleed
+   layer *inside* the main window (layered on top of the WebView via the
+   GtkOverlay set up in main(), not as a second, separate top-level
+   window) so it always exactly fills and matches whatever state the
+   real window is actually in this run -- maximized, fullscreen, or a
+   plain resizable window -- instead of floating as its own small,
+   fixed-size, always-centered-on-the-screen window regardless of where
+   or how big the real window ends up.
+   Returns NULL (and leaves nothing on screen) if the boot logo isn't
+   shipped this run, so packaging without it still boots straight to the
+   bare webview with no overlay at all. */
+static GtkWidget *arktube_create_splash_overlay(void) {
     GtkWidget *backdrop = gtk_event_box_new();
     gtk_widget_set_hexpand(backdrop, TRUE);
     gtk_widget_set_vexpand(backdrop, TRUE);
@@ -358,42 +512,76 @@ static GtkWidget *arktube_create_splash_overlay(void) {
         GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
 
-    /* The logo card itself: GtkOverlay so the spinner floats on top of
-       the image at an exact pixel position instead of sharing a box
-       layout with it (which is what pushed an earlier version's spinner
-       down below the whole image, centered under the character rather
-       than near the text). Centered within the backdrop -- via
-       ALIGN_CENTER rather than ALIGN_FILL -- so it keeps its original,
-       fixed ARKTUBE_SPLASH_WIDTH size and sits in the middle of however
-       big the backdrop (i.e. the real window) actually is. */
+    /* GtkOverlay so the spinner floats on top of the stretched image at
+       an exact pixel position instead of sharing a box layout with it.
+       Fills the backdrop completely (hexpand/vexpand + ALIGN_FILL)
+       rather than shrink-wrapping to a fixed size and centering, so the
+       image beneath it stretches to the real window's actual size. */
     GtkWidget *card = gtk_overlay_new();
-    gtk_widget_set_halign(card, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(card, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(card, TRUE);
+    gtk_widget_set_vexpand(card, TRUE);
+    gtk_widget_set_halign(card, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(card, GTK_ALIGN_FILL);
     gtk_container_add(GTK_CONTAINER(backdrop), card);
 
-    GtkWidget *image = gtk_image_new_from_pixbuf(logo);
-    g_object_unref(logo);
-    gtk_container_add(GTK_CONTAINER(card), image);
+    GtkWidget *image_area = arktube_create_stretch_image_area(
+        "splash screen/boot-logo.png",
+        "ARKtube: 'splash screen/boot-logo.png' not found; skipping the "
+        "splash screen this run.");
+    if (!image_area) {
+        return NULL;
+    }
+    gtk_container_add(GTK_CONTAINER(card), image_area);
 
-    /* Scale the measured native-image text coordinates down by the same
-       factor the artwork itself was just scaled by, so the spinner
-       tracks the tagline at any ARKTUBE_SPLASH_WIDTH. */
-    gdouble scale = (gdouble)ARKTUBE_SPLASH_WIDTH / (gdouble)ARKTUBE_SPLASH_LOGO_NATIVE_WIDTH;
-    gint margin_start = (gint)(ARKTUBE_SPLASH_TEXT_LEFT_NATIVE * scale);
-    gint margin_top = (gint)(
-        (ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE + ARKTUBE_SPLASH_SPINNER_GAP_NATIVE) * scale);
-
-    /* The "loading circle": pinned just under the tagline text,
-       left-aligned with it rather than centered under the artwork. */
+    /* The "loading circle": pinned just under the tagline text, centered
+       under its midpoint. Repositioned on every resize of image_area
+       (see arktube_splash_reposition_spinner() above), since the
+       stretched image's scale changes with the window's own size. */
     GtkWidget *spinner = gtk_spinner_new();
     gtk_widget_set_size_request(spinner, ARKTUBE_SPLASH_SPINNER_SIZE,
                                  ARKTUBE_SPLASH_SPINNER_SIZE);
     gtk_widget_set_halign(spinner, GTK_ALIGN_START);
     gtk_widget_set_valign(spinner, GTK_ALIGN_START);
-    gtk_widget_set_margin_start(spinner, margin_start);
-    gtk_widget_set_margin_top(spinner, margin_top);
     gtk_spinner_start(GTK_SPINNER(spinner));
     gtk_overlay_add_overlay(GTK_OVERLAY(card), spinner);
+    g_signal_connect(image_area, "size-allocate",
+                      G_CALLBACK(arktube_splash_reposition_spinner), spinner);
+
+    return backdrop;
+}
+
+/* No-internet overlay: no_internet.png stretched to exactly fill the
+   window (same arktube_stretch_image_draw() approach as the boot splash
+   above) in place of the browser. No spinner on this one: the retry
+   loop runs silently in the background (see arktube_connectivity_thread
+   below) and this overlay is simply replaced the moment that loop finds
+   a connection, so there's nothing useful for a spinner to represent
+   here. Returns NULL under the same "not shipped this run" condition as
+   the boot splash. */
+static GtkWidget *arktube_create_no_internet_overlay(void) {
+    GtkWidget *backdrop = gtk_event_box_new();
+    gtk_widget_set_hexpand(backdrop, TRUE);
+    gtk_widget_set_vexpand(backdrop, TRUE);
+    gtk_widget_set_halign(backdrop, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(backdrop, GTK_ALIGN_FILL);
+    gtk_widget_set_name(backdrop, "arktube-no-internet-backdrop");
+
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(
+        css, "#arktube-no-internet-backdrop { background-color: #0f0f0f; }", -1, NULL);
+    gtk_style_context_add_provider(
+        gtk_widget_get_style_context(backdrop),
+        GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+
+    GtkWidget *image_area = arktube_create_stretch_image_area(
+        "splash screen/no_internet.png",
+        "ARKtube: 'splash screen/no_internet.png' not found; cannot show "
+        "the no-internet screen this run.");
+    if (!image_area) {
+        return NULL;
+    }
+    gtk_container_add(GTK_CONTAINER(backdrop), image_area);
 
     return backdrop;
 }
@@ -444,6 +632,88 @@ static void on_webview_load_changed(WebKitWebView *webview, WebKitLoadEvent load
         return;
     }
     arktube_dismiss_splash((ArktubeSplashState *)user_data);
+}
+
+/* Gates the WebView ever being pointed at ARKTUBE_URL behind the
+   connectivity check below, so a genuinely offline machine shows
+   no_internet.png -- never an empty or perpetually-loading browser --
+   and only starts the real load (WebView + boot splash, exactly the
+   existing flow) once arktube_check_internet_now() actually succeeds. */
+typedef struct {
+    GtkWidget          *root_overlay;
+    GtkWidget          *webview;
+    ArktubeSplashState *splash_state;
+    GtkWidget          *no_internet_overlay; /* main-thread-only; NULL when not shown */
+    gboolean            webview_started;     /* main-thread-only; guards a single load_uri() */
+} ArktubeConnectivityState;
+
+/* Main-thread idle callback: starts the real app, the same WebView
+   load + boot splash the app always showed before this offline gating
+   existed. Tearing down a no-internet overlay first if the connection
+   only came back after one was already shown. Idempotent via
+   webview_started, in case this somehow ran more than once. */
+static gboolean arktube_on_internet_ready(gpointer user_data) {
+    ArktubeConnectivityState *cs = (ArktubeConnectivityState *)user_data;
+
+    if (cs->no_internet_overlay) {
+        gtk_widget_destroy(cs->no_internet_overlay);
+        cs->no_internet_overlay = NULL;
+    }
+
+    if (!cs->webview_started) {
+        cs->webview_started = TRUE;
+        webkit_web_view_load_uri(WEBKIT_WEB_VIEW(cs->webview), ARKTUBE_URL);
+
+        GtkWidget *splash = arktube_create_splash_overlay();
+        if (splash) {
+            gtk_overlay_add_overlay(GTK_OVERLAY(cs->root_overlay), splash);
+            gtk_widget_show_all(splash);
+            cs->splash_state->splash = splash;
+            cs->splash_state->fallback_id = g_timeout_add(
+                ARKTUBE_SPLASH_MAX_WAIT_MS, on_splash_fallback_timeout, cs->splash_state);
+        }
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+/* Main-thread idle callback: shows the no-internet screen the first
+   time a check fails. Guarded so repeated failures during the retry
+   loop don't pile up duplicate overlays on top of each other. */
+static gboolean arktube_on_internet_unavailable(gpointer user_data) {
+    ArktubeConnectivityState *cs = (ArktubeConnectivityState *)user_data;
+
+    if (!cs->no_internet_overlay && !cs->webview_started) {
+        GtkWidget *overlay = arktube_create_no_internet_overlay();
+        if (overlay) {
+            gtk_overlay_add_overlay(GTK_OVERLAY(cs->root_overlay), overlay);
+            gtk_widget_show_all(overlay);
+            cs->no_internet_overlay = overlay;
+        }
+    }
+
+    return G_SOURCE_REMOVE;
+}
+
+/* Runs entirely off the main thread: repeats arktube_check_internet_now()
+   (itself bounded by ARKTUBE_CONNECTIVITY_TIMEOUT_MS) with an
+   ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS sleep between failed attempts,
+   until one succeeds -- then hands off to the main thread via
+   g_idle_add() and exits. Nothing in this function touches GTK directly;
+   only the two callbacks above do, and only ever on the main thread,
+   which is what makes it safe for this to run concurrently with the
+   GTK main loop at all. */
+static gpointer arktube_connectivity_thread(gpointer user_data) {
+    ArktubeConnectivityState *cs = (ArktubeConnectivityState *)user_data;
+
+    for (;;) {
+        if (arktube_check_internet_now()) {
+            g_idle_add(arktube_on_internet_ready, cs);
+            return NULL;
+        }
+        g_idle_add(arktube_on_internet_unavailable, cs);
+        g_usleep(ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS * 1000);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -559,31 +829,31 @@ int main(int argc, char **argv) {
     g_signal_connect(webview, "load-changed",
                       G_CALLBACK(on_webview_load_changed), splash_state);
 
-    /* Start loading the TV interface immediately -- the splash overlay
-       built below covers WebKit's own startup and the page's load, and
-       is only dismissed once "load-changed" actually reports
-       WEBKIT_LOAD_FINISHED (or, failing that, ARKTUBE_SPLASH_MAX_WAIT_MS
-       elapses), so the real window is only ever shown with either the
-       finished result already on screen or about to be, never an empty
-       WebView on its own. */
-    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(webview), ARKTUBE_URL);
-
-    GtkWidget *splash = arktube_create_splash_overlay();
-    if (splash) {
-        gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), splash);
-        splash_state->splash = splash;
-        splash_state->fallback_id =
-            g_timeout_add(ARKTUBE_SPLASH_MAX_WAIT_MS, on_splash_fallback_timeout, splash_state);
-    }
+    /* The WebView is never pointed at ARKTUBE_URL directly here anymore
+       -- arktube_on_internet_ready() (run from the background
+       connectivity thread below, via g_idle_add) is what actually calls
+       webkit_web_view_load_uri() and builds the boot splash, and only
+       once arktube_check_internet_now() has confirmed there's a
+       connection. Until then, arktube_on_internet_unavailable() shows
+       no_internet.png in the same full-bleed overlay spot instead, so a
+       genuinely offline machine never sits on an empty or endlessly
+       "loading" browser. */
+    ArktubeConnectivityState *connectivity_state = g_new0(ArktubeConnectivityState, 1);
+    connectivity_state->root_overlay = root_overlay;
+    connectivity_state->webview = webview;
+    connectivity_state->splash_state = splash_state;
+    g_thread_new("arktube-connectivity", arktube_connectivity_thread, connectivity_state);
 
     /* Show the real window immediately, already in its final
        maximized/fullscreen state (set above) -- whatever's on top
-       (the splash backdrop, if one was built) is what's actually
-       visible at this point; nothing is deferred behind a second
-       window anymore. */
+       (the no-internet screen or the boot splash, once the connectivity
+       thread's first check reports back) is what actually becomes
+       visible; nothing is deferred behind a second window anymore. */
     gtk_widget_show_all(window);
 
     gtk_main();
+
+    g_free(connectivity_state);
 
     g_free(splash_state);
     return EXIT_SUCCESS;
