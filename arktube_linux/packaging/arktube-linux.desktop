@@ -7,3 +7,4 @@ Icon=arktube-linux
 Categories=AudioVideo;Player;
 Terminal=false
 StartupNotify=true
+StartupWMClass=arktube-linux

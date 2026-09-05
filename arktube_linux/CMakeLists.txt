@@ -51,3 +51,28 @@ install(FILES packaging/arktube-linux.desktop DESTINATION share/applications)
 install(FILES resources/icons/appIcon.png
         DESTINATION share/icons/hicolor/256x256/apps
         RENAME arktube-linux.png)
+
+# Both caches are what actually make Icon=arktube-linux (in the .desktop
+# file above) and the freshly-installed hicolor PNG resolvable to
+# anything that looks them up by name -- GNOME's dock included -- without
+# a logout/re-login. Neither tool is guaranteed present on every build
+# host (e.g. a minimal container image used only to compile this), so
+# both are looked up and silently skipped if missing rather than failing
+# `cmake --install`; a real desktop install normally has them, and most
+# packaging formats (.deb postinst, etc.) already run their own
+# equivalent of this regardless.
+find_program(GTK_UPDATE_ICON_CACHE_EXE gtk-update-icon-cache)
+if(GTK_UPDATE_ICON_CACHE_EXE)
+    install(CODE "execute_process(
+        COMMAND ${GTK_UPDATE_ICON_CACHE_EXE} -f -t
+                \"\${CMAKE_INSTALL_PREFIX}/share/icons/hicolor\"
+        ERROR_QUIET)")
+endif()
+
+find_program(UPDATE_DESKTOP_DATABASE_EXE update-desktop-database)
+if(UPDATE_DESKTOP_DATABASE_EXE)
+    install(CODE "execute_process(
+        COMMAND ${UPDATE_DESKTOP_DATABASE_EXE}
+                \"\${CMAKE_INSTALL_PREFIX}/share/applications\"
+        ERROR_QUIET)")
+endif()

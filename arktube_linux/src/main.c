@@ -55,6 +55,21 @@
 #define ARKTUBE_TITLE "ARKtube"
 #define ARKTUBE_URL "https://www.youtube.com/tv#/"
 
+/* Must match packaging/arktube-linux.desktop's filename (its desktop-file
+   id, "arktube-linux.desktop" minus the extension) and that file's Icon=
+   key. GNOME Shell's dock/dash matches a *running window* back to an
+   installed .desktop launcher (to know what to show/pin) by comparing
+   WM_CLASS on X11, or the xdg_toplevel app-id on Wayland, against that
+   id -- and GTK derives both from g_get_prgname() for a plain GtkWindow
+   app like this one, not from the binary name. Left at the g_get_prgname()
+   default, that comparison is "arktube_linux" (this binary's argv[0])
+   vs. the desktop file's "arktube-linux" -- close enough to read as the
+   same app to a person, but not an exact string match, so the window
+   goes unmatched and GNOME falls back to a generic icon in the dock.
+   Setting the prgname explicitly, here, is what keeps that comparison
+   consistent. */
+#define ARKTUBE_WM_CLASS "arktube-linux"
+
 /* Full replacement, matching the old shell's "chrome mode" user agent
    (see ../ARKtube/neutralino.config.json's "chrome".args and
    README.md's Chrome-Mode-vs-Window-Mode section) so YouTube's
@@ -365,9 +380,28 @@ static gboolean on_splash_timeout(gpointer user_data) {
 }
 
 int main(int argc, char **argv) {
+    /* Must happen before gtk_init(): GDK reads g_get_prgname() while
+       setting up the X11 WM_CLASS hint (and the Wayland xdg_toplevel
+       app-id) for every window this process creates, and that's the
+       identity GNOME Shell's dock matches against installed .desktop
+       files -- see the ARKTUBE_WM_CLASS comment above. Setting it here
+       covers every window (splash included) consistently, rather than
+       patching one window after the fact. */
+    g_set_prgname(ARKTUBE_WM_CLASS);
+
     gtk_init(&argc, &argv);
 
     g_set_application_name(ARKTUBE_TITLE);
+
+    /* Default icon for every window this process creates, looked up by
+       name from the icon theme -- the same "arktube-linux" name the
+       .desktop file's Icon= key resolves, and the same PNG that gets
+       installed to share/icons/hicolor/256x256/apps/ (see
+       CMakeLists.txt). Consistent with the WM_CLASS/app-id fix above:
+       one name, matched in both places, rather than the window's own
+       XWMHints icon (set below, from a raw file path) being the only
+       thing that ever agreed with the .desktop file. */
+    gtk_window_set_default_icon_name(ARKTUBE_WM_CLASS);
 
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), ARKTUBE_TITLE);
@@ -389,6 +423,12 @@ int main(int argc, char **argv) {
 
     gchar *icon_path = arktube_find_resource("icons/appIcon.png");
     if (icon_path) {
+        /* Belt-and-suspenders on top of gtk_window_set_default_icon_name()
+           above: this covers running straight out of the build tree or an
+           install whose icon cache hasn't been regenerated yet, where an
+           icon-theme lookup by name would find nothing. Installed-and-
+           cached runs get the same picture either way, since this is the
+           same file the hicolor icon is a copy of. */
         GError *error = NULL;
         if (!gtk_window_set_icon_from_file(GTK_WINDOW(window), icon_path, &error)) {
             g_warning("ARKtube: could not load window icon '%s': %s", icon_path,
