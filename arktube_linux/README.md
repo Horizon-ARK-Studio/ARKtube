@@ -62,6 +62,14 @@ Currently working:
 * [x] Home key navigates back to `/tv`'s root without a full reload
 * [x] Gamepad/remote input, remapped to the same keyboard events
       youtube.com/tv already understands
+* [x] Cheap Bluetooth/IR TV-remote support (the kind that registers as
+      a plain Linux keyboard device, e.g. a Fire TV Stick remote --
+      see `evtest`): D-pad/OK already work unmodified since their
+      evdev codes land on keysyms the page already understands, and
+      the Home and search/voice (Alexa/Google Assistant) buttons are
+      remapped in `src/main.c`'s `arktube_remap_remote_keyval()` to a
+      real Home keypress and `/` respectively, ahead of the WebView
+      seeing them
 * [x] Cursor auto-hide after 10s idle
 * [x] Background connectivity check (raw TCP connect to `8.8.8.8:53`,
       retried on a timer) that gates the WebView's first load, showing
