@@ -39,6 +39,10 @@ posture toward the page — is unchanged.
 - `bin/` ships prebuilt Neutralino binaries for Linux (x64/arm64/armhf), macOS
   (x64/arm64/universal), and Windows (x64) — Linux is the current test target.
 
+## Notice
+
+While making the app, the limitations i faced because neutralino. So the decision was made to switch over to native instead. so this is a stale version. Only meant to be used as reference before the linux native version was added. When that is done and working, Windows and mac will follow sooner.
+
 ## Prerequisites (Linux)
 
 Neutralino's Linux binary needs **WebKitGTK** installed on the system — it is
