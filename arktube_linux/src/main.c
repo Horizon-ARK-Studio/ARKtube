@@ -81,9 +81,16 @@
 #define ARKTUBE_DEFAULT_WIDTH 1280
 #define ARKTUBE_DEFAULT_HEIGHT 720
 
-/* Splash screen shown on startup while the main window's WebView loads
-   youtube.com/tv underneath it. */
-#define ARKTUBE_SPLASH_DURATION_MS 5000
+/* Splash overlay shown on startup while the main window's WebView loads
+   youtube.com/tv underneath it. Drawn as a full-bleed layer *inside* the
+   real app window (see the GtkOverlay wiring in main()) and dismissed
+   the moment the WebView actually reports WEBKIT_LOAD_FINISHED, not
+   after a fixed guess at how long that should take -- see
+   on_webview_load_changed() below. ARKTUBE_SPLASH_MAX_WAIT_MS is only a
+   defensive ceiling: if "load-changed" never reports FINISHED for some
+   reason (a stalled resource, a WebKit quirk), the splash is dismissed
+   anyway after this long rather than sitting on screen forever. */
+#define ARKTUBE_SPLASH_MAX_WAIT_MS 20000
 #define ARKTUBE_SPLASH_WIDTH 860
 
 /* boot-logo.png is a fixed 1672x941 piece of artwork (the ARKtube
@@ -292,15 +299,25 @@ static void inject_user_script(WebKitUserContentManager *ucm, const char *path) 
     g_free(contents);
 }
 
-/* Splash shown for ARKTUBE_SPLASH_DURATION_MS on startup: boot-logo.png
-   rendered edge-to-edge (undecorated, centered, no border around it --
-   the artwork itself already frames both the wordmark and the tagline)
-   with a spinning "loading" indicator overlaid just under the tagline,
-   while the main window's WebView loads youtube.com/tv behind it.
+/* Splash overlay: boot-logo.png rendered edge-to-edge (no border around
+   it -- the artwork itself already frames both the wordmark and the
+   tagline) with a spinning "loading" indicator overlaid just under the
+   tagline, drawn as a full-bleed backdrop *inside* the main window
+   (layered on top of the WebView via the GtkOverlay set up in main(),
+   not as a second, separate top-level window the way this used to
+   work) so it always exactly fills and matches whatever state the real
+   window is actually in this run -- maximized, fullscreen, or a plain
+   resizable window -- instead of floating as its own small, fixed-size,
+   always-centered-on-the-screen window regardless of where or how big
+   the real window ends up. That mismatch is exactly what showed up as
+   the splash visibly not covering the app's own window: a small
+   ARKTUBE_SPLASH_WIDTH-wide box sitting in whatever position
+   GTK_WIN_POS_CENTER happened to compute before the real window had
+   even appeared, with the desktop still visible around it.
    Returns NULL (and leaves nothing on screen) if the boot logo isn't
    shipped this run, so packaging without it still boots straight to the
-   main window. */
-static GtkWidget *arktube_create_splash_window(void) {
+   bare webview with no overlay at all. */
+static GtkWidget *arktube_create_splash_overlay(void) {
     gchar *logo_path = arktube_find_resource("splash screen/boot-logo.png");
     if (!logo_path) {
         g_warning("ARKtube: 'splash screen/boot-logo.png' not found; "
@@ -320,23 +337,43 @@ static GtkWidget *arktube_create_splash_window(void) {
         return NULL;
     }
 
-    GtkWidget *splash = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_decorated(GTK_WINDOW(splash), FALSE);
-    gtk_window_set_resizable(GTK_WINDOW(splash), FALSE);
-    gtk_window_set_position(GTK_WINDOW(splash), GTK_WIN_POS_CENTER);
-    gtk_window_set_skip_taskbar_hint(GTK_WINDOW(splash), TRUE);
-    gtk_window_set_type_hint(GTK_WINDOW(splash), GDK_WINDOW_TYPE_HINT_SPLASHSCREEN);
+    /* Full-bleed backdrop: sized to whatever the real window's client
+       area is (via hexpand/vexpand + ALIGN_FILL, once added as an
+       overlay child in main()) rather than shrink-wrapping to the logo
+       image the way the old separate splash window did -- matching the
+       old shell's #0f0f0f loading-state background so nothing behind it
+       (the WebView, still mid-load) is ever visible through the edges. */
+    GtkWidget *backdrop = gtk_event_box_new();
+    gtk_widget_set_hexpand(backdrop, TRUE);
+    gtk_widget_set_vexpand(backdrop, TRUE);
+    gtk_widget_set_halign(backdrop, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(backdrop, GTK_ALIGN_FILL);
+    gtk_widget_set_name(backdrop, "arktube-splash-backdrop");
 
-    /* GtkOverlay so the spinner floats on top of the image at an exact
-       pixel position instead of sharing a box layout with it (which is
-       what pushed the old version's spinner down below the whole image,
-       centered under the character rather than near the text). */
-    GtkWidget *overlay = gtk_overlay_new();
-    gtk_container_add(GTK_CONTAINER(splash), overlay);
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(
+        css, "#arktube-splash-backdrop { background-color: #0f0f0f; }", -1, NULL);
+    gtk_style_context_add_provider(
+        gtk_widget_get_style_context(backdrop),
+        GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+
+    /* The logo card itself: GtkOverlay so the spinner floats on top of
+       the image at an exact pixel position instead of sharing a box
+       layout with it (which is what pushed an earlier version's spinner
+       down below the whole image, centered under the character rather
+       than near the text). Centered within the backdrop -- via
+       ALIGN_CENTER rather than ALIGN_FILL -- so it keeps its original,
+       fixed ARKTUBE_SPLASH_WIDTH size and sits in the middle of however
+       big the backdrop (i.e. the real window) actually is. */
+    GtkWidget *card = gtk_overlay_new();
+    gtk_widget_set_halign(card, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(card, GTK_ALIGN_CENTER);
+    gtk_container_add(GTK_CONTAINER(backdrop), card);
 
     GtkWidget *image = gtk_image_new_from_pixbuf(logo);
     g_object_unref(logo);
-    gtk_container_add(GTK_CONTAINER(overlay), image);
+    gtk_container_add(GTK_CONTAINER(card), image);
 
     /* Scale the measured native-image text coordinates down by the same
        factor the artwork itself was just scaled by, so the spinner
@@ -346,7 +383,7 @@ static GtkWidget *arktube_create_splash_window(void) {
     gint margin_top = (gint)(
         (ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE + ARKTUBE_SPLASH_SPINNER_GAP_NATIVE) * scale);
 
-    /* The 5s "loading circle": pinned just under the tagline text,
+    /* The "loading circle": pinned just under the tagline text,
        left-aligned with it rather than centered under the artwork. */
     GtkWidget *spinner = gtk_spinner_new();
     gtk_widget_set_size_request(spinner, ARKTUBE_SPLASH_SPINNER_SIZE,
@@ -356,27 +393,57 @@ static GtkWidget *arktube_create_splash_window(void) {
     gtk_widget_set_margin_start(spinner, margin_start);
     gtk_widget_set_margin_top(spinner, margin_top);
     gtk_spinner_start(GTK_SPINNER(spinner));
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), spinner);
+    gtk_overlay_add_overlay(GTK_OVERLAY(card), spinner);
 
-    return splash;
+    return backdrop;
 }
 
 typedef struct {
-    GtkWidget *window;
-    GtkWidget *splash;
-} ArktubeSplashData;
+    GtkWidget *splash;      /* NULL once dismissed (or if none was ever shown) */
+    guint      fallback_id; /* the ARKTUBE_SPLASH_MAX_WAIT_MS safety timer's source id, or 0 */
+} ArktubeSplashState;
 
-/* Fires once, ARKTUBE_SPLASH_DURATION_MS after the splash was shown:
-   tears down the splash and reveals the (already loading) main window. */
-static gboolean on_splash_timeout(gpointer user_data) {
-    ArktubeSplashData *data = (ArktubeSplashData *)user_data;
+/* Tears the splash overlay down, whichever of the two callbacks below
+   gets there first -- guarded so the other one, firing afterwards, is
+   just a no-op instead of a double-destroy. */
+static void arktube_dismiss_splash(ArktubeSplashState *state) {
+    if (!state->splash) {
+        return;
+    }
+    gtk_widget_destroy(state->splash);
+    state->splash = NULL;
+    if (state->fallback_id) {
+        g_source_remove(state->fallback_id);
+        state->fallback_id = 0;
+    }
+}
 
-    gtk_widget_destroy(data->splash);
-    gtk_widget_show_all(data->window);
-    gtk_window_present(GTK_WINDOW(data->window));
-
-    g_free(data);
+/* Defensive ceiling (see ARKTUBE_SPLASH_MAX_WAIT_MS above): reveals
+   whatever's underneath even if the WebView never reports
+   WEBKIT_LOAD_FINISHED for some reason. */
+static gboolean on_splash_fallback_timeout(gpointer user_data) {
+    ArktubeSplashState *state = (ArktubeSplashState *)user_data;
+    state->fallback_id = 0; /* this source is already being removed by returning below */
+    arktube_dismiss_splash(state);
     return G_SOURCE_REMOVE;
+}
+
+/* The real trigger: dismiss the splash exactly when youtube.com/tv has
+   actually finished loading, rather than after a fixed guess at how
+   long that should take -- so a fast connection isn't held on the
+   splash needlessly, and a slow one doesn't get dumped onto a
+   half-loaded page just because a timer ran out. WEBKIT_LOAD_FINISHED
+   fires once the main frame's own load has completed; youtube.com/tv's
+   own client-side JS may still be settling its UI a moment after that,
+   the same trade-off the old fixed-timer version had no visibility into
+   at all. */
+static void on_webview_load_changed(WebKitWebView *webview, WebKitLoadEvent load_event,
+                                     gpointer user_data) {
+    (void)webview;
+    if (load_event != WEBKIT_LOAD_FINISHED) {
+        return;
+    }
+    arktube_dismiss_splash((ArktubeSplashState *)user_data);
 }
 
 int main(int argc, char **argv) {
@@ -470,31 +537,54 @@ int main(int argc, char **argv) {
     webkit_settings_set_hardware_acceleration_policy(
         settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
 
-    gtk_container_add(GTK_CONTAINER(window), webview);
+    /* GtkOverlay owns both layers now: the WebView fills it as the base
+       child, and (if boot-logo.png shipped) the splash backdrop sits on
+       top of it as an overlay child -- both inside this one, real,
+       already-maximized/fullscreen GtkWindow (set above), instead of the
+       splash being a second, separate, fixed-size top-level window. See
+       arktube_create_splash_overlay()'s comment for the bug that used to
+       cause: the splash not actually filling/matching the app's own
+       window, and appearing as a small box with the desktop visible
+       around it. */
+    GtkWidget *root_overlay = gtk_overlay_new();
+    gtk_container_add(GTK_CONTAINER(window), root_overlay);
+    gtk_container_add(GTK_CONTAINER(root_overlay), webview);
 
     g_signal_connect(window, "key-press-event", G_CALLBACK(on_window_key_press), NULL);
     g_signal_connect(window, "delete-event", G_CALLBACK(on_window_delete), NULL);
 
-    /* Start loading the TV interface immediately, in the background --
-       the splash screen below covers WebKit's startup + page load, so
-       the main window is only ever shown once (post-splash), instead of
-       flashing an empty webview first. */
+    /* Connected before load_uri() below so "load-changed" can't possibly
+       fire WEBKIT_LOAD_FINISHED before anything is listening for it. */
+    ArktubeSplashState *splash_state = g_new0(ArktubeSplashState, 1);
+    g_signal_connect(webview, "load-changed",
+                      G_CALLBACK(on_webview_load_changed), splash_state);
+
+    /* Start loading the TV interface immediately -- the splash overlay
+       built below covers WebKit's own startup and the page's load, and
+       is only dismissed once "load-changed" actually reports
+       WEBKIT_LOAD_FINISHED (or, failing that, ARKTUBE_SPLASH_MAX_WAIT_MS
+       elapses), so the real window is only ever shown with either the
+       finished result already on screen or about to be, never an empty
+       WebView on its own. */
     webkit_web_view_load_uri(WEBKIT_WEB_VIEW(webview), ARKTUBE_URL);
 
-    GtkWidget *splash = arktube_create_splash_window();
+    GtkWidget *splash = arktube_create_splash_overlay();
     if (splash) {
-        gtk_widget_show_all(splash);
-
-        ArktubeSplashData *splash_data = g_new(ArktubeSplashData, 1);
-        splash_data->window = window;
-        splash_data->splash = splash;
-        g_timeout_add(ARKTUBE_SPLASH_DURATION_MS, on_splash_timeout, splash_data);
-    } else {
-        /* No boot logo shipped this run -- skip straight to the main
-           window rather than blocking startup on a splash that can't show. */
-        gtk_widget_show_all(window);
+        gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), splash);
+        splash_state->splash = splash;
+        splash_state->fallback_id =
+            g_timeout_add(ARKTUBE_SPLASH_MAX_WAIT_MS, on_splash_fallback_timeout, splash_state);
     }
 
+    /* Show the real window immediately, already in its final
+       maximized/fullscreen state (set above) -- whatever's on top
+       (the splash backdrop, if one was built) is what's actually
+       visible at this point; nothing is deferred behind a second
+       window anymore. */
+    gtk_widget_show_all(window);
+
     gtk_main();
+
+    g_free(splash_state);
     return EXIT_SUCCESS;
 }
