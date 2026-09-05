@@ -392,6 +392,14 @@ static void arktube_remap_remote_keyval(GdkEventKey *event) {
         default:
             break;
     }
+
+    /* Remote's PROGRAM/guide button: unlike Home/Search above, evdev
+       KEY_PROGRAM has no keysym bound to it in the stock XKB tables, so
+       it arrives as GDK_KEY_VoidSymbol -- catch it by hardware keycode
+       (X keycode 370 = evdev code 362 + 8) and remap to F11 instead. */
+    if (event->keyval == GDK_KEY_VoidSymbol && event->hardware_keycode == 370) {
+        event->keyval = GDK_KEY_F11;
+    }
 }
 
 /* F11 toggles fullscreen; Escape only ever backs out of it, mirroring
