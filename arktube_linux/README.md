@@ -66,6 +66,18 @@ native replacement rather than a direct copy):
 * [ ] Packaging (AppImage/.deb equivalents, an install target exists
       in `CMakeLists.txt` but isn't wired into a CI artifact yet)
 
+## Hardware acceleration & stutter
+
+WebKitGTK is asked to keep GPU compositing on unconditionally
+(`WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS`, set in `src/main.c`),
+but smooth playback also depends on the system's GStreamer/VA-API
+stack for video decode. If playback is stuttery, see
+[`docs/HARDWARE-ACCELERATION.md`](docs/HARDWARE-ACCELERATION.md) for
+the GStreamer VA-API packages to install, how to pick the right driver
+for your GPU, and the `WEBKIT_DISABLE_DMABUF_RENDERER` troubleshooting
+step for the rarer case where accelerated compositing itself -- not
+decode -- is the cause.
+
 ## Building
 
 **CI does the actual compiling** (see `.github/workflows` at the repo
@@ -120,5 +132,6 @@ arktube_linux/
 ├── packaging/
 │   └── arktube-linux.desktop
 └── docs/
-    └── PORTING-NOTES.md    # file-by-file mapping from ../ARKtube
+    ├── PORTING-NOTES.md    # file-by-file mapping from ../ARKtube
+    └── HARDWARE-ACCELERATION.md  # VA-API setup and stutter troubleshooting
 ```

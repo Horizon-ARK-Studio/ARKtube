@@ -222,6 +222,16 @@ int main(int argc, char **argv) {
     webkit_settings_set_enable_developer_extras(settings, TRUE);
     webkit_settings_set_enable_media_stream(settings, TRUE);
     webkit_settings_set_enable_webaudio(settings, TRUE);
+    /* ALWAYS is WebKitGTK's own default since 2.16, but state it explicitly
+       so a future WebKit default change, or a distro/session compositing
+       override, can't silently fall back to software rendering underneath
+       us -- that's the single biggest source of the stutter this app is
+       built to avoid. See docs/HARDWARE-ACCELERATION.md for the system
+       packages (GStreamer VA-API) this still depends on for smooth video
+       decode, and the WEBKIT_DISABLE_DMABUF_RENDERER escape hatch for the
+       rarer case where accelerated compositing itself is the problem. */
+    webkit_settings_set_hardware_acceleration_policy(
+        settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS);
 
     gtk_container_add(GTK_CONTAINER(window), webview);
 
