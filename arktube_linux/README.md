@@ -3,18 +3,22 @@
 A native Linux port of ARKtube: **one GTK3 + WebKit2GTK process, no
 Neutralino, no embedded/reparented Chrome.**
 
-The `../ARKtube` directory (Neutralino + hybrid embedded-Chrome shell)
-is unaffected by this and keeps building the same way it always has,
-via `.github/workflows/stage0.yml`. This directory is a from-scratch,
-Linux-only rewrite living alongside it, not a modification of it.
+This is now the only application code on the `main` branch. An earlier
+revision of this project wrapped YouTube in Neutralinojs instead, with
+a Linux build that spawned and reparented a separate Chrome process
+(the shell this replaced); that Neutralino app lived in an `ARKtube/`
+directory that has since been removed from `main` (see the git history
+if you want the old code). `docs/bugs-caught/` still documents the bug
+history from that earlier approach, since the same GStreamer/hardware-
+acceleration notes still apply here.
 
 ## Why
 
-`../ARKtube`'s Linux build works by spawning a real, separate Chrome
-process and reparenting it as an X11 child of Neutralino's own window
-(`packaging/linux/embed-chrome.sh`), so that YouTube (rendered by that
-Chrome process) visually fills a window that Neutralino actually owns
-and controls. That buys a fully-spoofable user agent and a real Chrome
+The old Neutralino-based Linux build worked by spawning a real,
+separate Chrome process and reparenting it as an X11 child of
+Neutralino's own window, so that YouTube (rendered by that Chrome
+process) visually filled a window that Neutralino actually owned and
+controlled. That bought a fully-spoofable user agent and a real Chrome
 engine, at a real cost documented in `../docs/bugs-caught`:
 
 * it needs `xdotool`/`wmctrl`/`xbindkeys` and an X11 session --
@@ -38,9 +42,9 @@ which is exactly what this directory is for.
 
 ## Status
 
-🚧 **Early port, in progress.** This starts from the smallest possible
-slice and grows from there, carrying functionality over from
-`../ARKtube` piece by piece.
+🚧 **Early port, in progress.** This started from the smallest possible
+slice and has grown from there, carrying functionality over from the
+old Neutralino-based shell piece by piece.
 
 Currently working:
 
@@ -51,10 +55,21 @@ Currently working:
       -- the UA header alone isn't sufficient; youtube.com/tv's bootstrap
       JS reads the JS-visible identity directly too.
 * [x] F11 fullscreen toggle, Escape to exit fullscreen
+* [x] Fullscreen state persisted across restarts, in a GKeyFile under
+      `$XDG_CONFIG_HOME/arktube_linux/config.ini` (see
+      `arktube_load_fullscreen_pref()`/`arktube_save_fullscreen_pref()`
+      in `src/main.c`)
 * [x] Home key navigates back to `/tv`'s root without a full reload
 * [x] Gamepad/remote input, remapped to the same keyboard events
       youtube.com/tv already understands
 * [x] Cursor auto-hide after 10s idle
+* [x] Background connectivity check (raw TCP connect to `8.8.8.8:53`,
+      retried on a timer) that gates the WebView's first load, showing
+      a full-bleed "no internet" screen (`splash screen/no_internet.png`)
+      instead of an empty or perpetually-loading browser while offline
+* [x] Branded boot splash (`splash screen/boot-logo.png` + an animated
+      spinner), shown while the page loads and dismissed the moment
+      WebKit reports the load finished (with a 20s defensive fallback)
 * [x] Debian package built and uploaded automatically by
       `.github/workflows/arktube-linux.yml` (see "Building" below)
 
@@ -62,8 +77,8 @@ Not yet ported:
 
 * [ ] Tray icon / tray menu
 * [ ] Immersive Mode (fullscreen lockdown + devtools guard)
-* [ ] Persisted settings
 * [ ] AppImage packaging (only the `.deb` is currently produced by CI)
+* [ ] Windows / macOS builds
 
 ## Building
 
@@ -112,13 +127,19 @@ icon, matching a normal Linux `/usr` layout.
 arktube_linux/
 ├── CMakeLists.txt
 ├── src/
-│   └── main.c              # GTK3 + WebKit2GTK window/webview, F11/Escape
+│   └── main.c                    # GTK3 + WebKit2GTK window/webview,
+│                                  # F11/Escape, connectivity check,
+│                                  # boot splash + no-internet overlays
 ├── resources/
 │   ├── js/
-│   │   └── user-script.js  # injected page script -- ported subset of
-│   │                       # ../ARKtube/resources/js/app-init.js
-│   └── icons/
-│       └── appIcon.png
+│   │   └── user-script.js        # injected page script -- ported subset
+│   │                              # of the old Neutralino app-init.js
+│   ├── icons/
+│   │   ├── appIcon.png           # window/.desktop icon
+│   │   └── arktube-spinner.svg   # boot-splash loading spinner
+│   └── splash screen/
+│       ├── boot-logo.png         # boot splash backdrop
+│       └── no_internet.png       # shown while offline
 └── packaging/
     └── arktube-linux.desktop
 ```

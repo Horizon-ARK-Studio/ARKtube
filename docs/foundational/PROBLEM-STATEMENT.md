@@ -2,9 +2,16 @@
 
 ## Design Document
 
+> **Historical note:** this is the original design document, written
+> against a Neutralinojs shell that has since been removed from `main`
+> and replaced by the native GTK3 + WebKit2GTK app in `arktube_linux/`.
+> The objective and scope below are still the project's, but any
+> reference to "Neutralino", `app-init.js`, or the `ARKtube/` directory
+> describes that earlier, now-removed implementation.
+
 **Status:** Experimental
-**Target:** Desktop
-**Shell:** Neutralinojs
+**Target:** Desktop (currently Linux only)
+**Shell:** GTK3 + WebKit2GTK (`arktube_linux/`); originally Neutralinojs
 **Initial UI:** YouTube web UI
 **Initial frontend technology:** Existing YouTube frontend / DOM
 **Future migration:** Svelte

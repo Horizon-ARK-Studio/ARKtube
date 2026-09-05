@@ -1,6 +1,10 @@
 # Cursor auto-hide
 
-**Status:** Implemented in `resources/js/app-init.js`.
+**Status:** Implemented. Originally in the old Neutralino shell's
+`resources/js/app-init.js`; that shell has since been removed from
+`main`, and this same logic (unchanged) now lives in
+`arktube_linux/resources/js/user-script.js`. The rest of this doc, kept
+as the implementation record, still refers to `app-init.js`.
 **Built on:** nothing else in this branch; added specifically to close a
 gap the `webtop` branch's Stage 7 could only partially close on its own
 — see `docs/STAGE-7-VISIBILITY-AND-CURSOR.md` on that branch for the

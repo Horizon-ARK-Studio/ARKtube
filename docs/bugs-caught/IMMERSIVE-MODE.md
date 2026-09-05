@@ -1,6 +1,13 @@
 # Immersive Mode
 
-**Status:** implemented (Linux: `.deb` and AppImage packaging).
+> **Historical note:** this describes the old Neutralino-based shell,
+> which has since been removed from `main` and replaced by the native
+> `arktube_linux/` app. Immersive Mode has not been ported to
+> `arktube_linux/` yet — see that app's `README.md` "Not yet ported"
+> list. Kept here as the design/implementation record for when it is.
+
+**Status:** implemented in the old shell (Linux: `.deb` and AppImage
+packaging).
 **Scope:** `ARKtube/resources/js/app-init.js`, `ARKtube/neutralino.config.json`,
 `ARKtube/packaging/linux/build-deb.sh`, `ARKtube/packaging/linux/AppRun`.
 **Not yet done:** `ARKtube/packaging/windows/Launch-ARKtube.ps1` and

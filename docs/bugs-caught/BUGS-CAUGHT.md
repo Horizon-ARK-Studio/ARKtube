@@ -1,6 +1,14 @@
 # ARKtube AppImage crash & playback-quality fix proposal
 
-**Status:** proposed, patches included in this branch
+> **Historical note:** this documents the old Neutralino-based shell
+> (since removed from `main` and replaced by the native `arktube_linux/`
+> app), and its `ARKtube/` directory / `neu build` tooling no longer
+> exists. The AppImage/`resources.neu`/`.tmp` fixes below are specific
+> to that shell. The GStreamer/hardware-acceleration diagnosis in §4
+> still applies as-is to `arktube_linux/` — see that app's `README.md`.
+
+**Status:** proposed, patches included in the (now-removed) Neutralino
+branch this was written against
 **Scope:** Linux AppImage distribution only (source `neu run` / `neu build`
 development flow was already fine)
 

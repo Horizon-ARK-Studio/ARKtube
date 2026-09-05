@@ -1,5 +1,11 @@
 # Proposal: A Foreground-Aware Voice Assistant for ARKtube
 
+> **Historical note:** written against the old Neutralino-based shell
+> (`app-init.js`, since removed from `main`). The gamepad/remote input
+> path it references now lives in
+> `arktube_linux/resources/js/user-script.js`; this proposal has not
+> been implemented against the native `arktube_linux/` app.
+
 ## 1. The problem this solves
 
 ARKtube's stated goal is "YouTube, installed" — you get the real youtube.com/tv interface with native window behavior. It already intercepts remote/gamepad input and re-dispatches it as `ArrowUp/Down/Left/Right`, `Enter`, `Escape`, `Home` so a Fire TV remote (or any controller exposed as a HID gamepad) drives navigation the same way a keyboard would.

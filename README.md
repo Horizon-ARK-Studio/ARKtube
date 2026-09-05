@@ -1,10 +1,11 @@
 # ARKtube
 
-## YouTube, as a desktop app.
+## YouTube, as a native desktop app.
 
-A lightweight YouTube desktop client built with [Neutralinojs](https://neutralino.js.org).
+A lightweight, single-process Linux desktop client for `youtube.com/tv`,
+built with **GTK3 + WebKit2GTK** (`arktube_linux/`).
 
-It looks like YouTube.
+It looks like YouTube's TV/Leanback interface.
 
 It behaves like an app.
 
@@ -20,13 +21,14 @@ YouTube is already a great product.
 
 The desktop website just doesn't always feel like a desktop application.
 
-This project keeps the familiar YouTube experience while giving it a persistent desktop shell.
+This project keeps the familiar YouTube TV experience while giving it a
+persistent, native desktop shell.
 
 ```text
-YouTube
-   +
-Neutralino
-   =
+YouTube (TV/Leanback UI)
+        +
+GTK3 + WebKit2GTK
+        =
 YouTube, installed.
 ```
 
@@ -40,14 +42,15 @@ The goal is simple:
 
 A desktop application should feel persistent.
 
-Navigation shouldn't feel like throwing the entire application away and rebuilding it from scratch.
+Navigation shouldn't feel like throwing the entire application away and
+rebuilding it from scratch.
 
 This project explores a different model:
 
 ```text
 ┌─────────────────────────────────────────┐
 │                                         │
-│              YouTube                    │
+│         YouTube (TV/Leanback)           │
 │                                         │
 │   Home → Search → Video → Channel       │
 │                                         │
@@ -64,37 +67,43 @@ The application stays alive.
 
 ## Built with
 
-* **Neutralinojs** — lightweight desktop shell
-* **YouTube** — the interface and content experience
-* **JavaScript** — the glue
-* **Vue 3** — optional for future custom UI
-* **Svelte** — possible future migration
+* **GTK3** — native window, event handling, and drawing
+* **WebKit2GTK** (4.1) — the same rendering engine GNOME Web / Epiphany
+  uses, running in the same process as the rest of the app
+* **YouTube's TV/Leanback interface** (`youtube.com/tv`) — the actual
+  interface and content experience
+* **C** — the native glue (`arktube_linux/src/main.c`)
+* **A small injected page script** — `arktube_linux/resources/js/user-script.js`
 
-Neutralinojs is used as the native application layer rather than bundling a complete browser runtime.
+This is a single native process: one window, one WebView, no second
+browser process to spawn or keep in sync, and no Node.js/npm build
+tooling required to build or run it.
 
 ---
 
 ## What this is
 
-**A desktop shell for YouTube.**
+**A native desktop shell for YouTube's TV interface.**
 
-The first version intentionally does very little.
+It requests and renders `youtube.com/tv` — YouTube's TV/Leanback
+interface, designed for D-pad/remote-style navigation — inside a native
+window, and adds the desktop/TV-box behavior that interface doesn't get
+for free in a plain browser tab:
 
-It should let YouTube remain YouTube.
-
-That means keeping:
-
-* the familiar interface
-* the existing player
-* search
-* channels
-* playlists
-* subscriptions
-* recommendations
-* account functionality
-* existing navigation patterns
-
-The application layer focuses on desktop behavior.
+* a full user-agent replacement (HTTP header *and* the JS-visible
+  `navigator`/`screen` identity) so YouTube serves the TV interface
+  reliably
+* fullscreen (F11) and Escape-to-unfullscreen, with the fullscreen
+  state remembered across restarts
+* Home-key in-page navigation back to the TV interface's root, without
+  a full page reload
+* gamepad/remote input remapped to the same keyboard events the page
+  already understands
+* cursor auto-hide after 10 seconds of idle mouse activity
+* a connectivity check and a "no internet" screen shown in place of an
+  empty or endlessly-loading browser when the machine is offline
+* a branded boot splash shown while the page loads, dismissed the
+  moment it actually finishes rather than after a fixed delay
 
 ---
 
@@ -113,190 +122,143 @@ There are already enough of those.
 
 This project is interested in something narrower:
 
-> **What if the YouTube website behaved like the desktop application it already looks like?**
+> **What if YouTube's TV interface behaved like the native desktop
+> application it already looks like?**
 
 ---
 
 ## Status
 
-🚧 **Experimental**
+🚧 **Early native port, in progress.**
 
-The first milestone is proving that YouTube can run reliably inside a Neutralino application while preserving the functionality users expect from the website.
+An earlier version of this project (removed from `main`; see the git
+history if you're curious) wrapped YouTube in
+[Neutralinojs](https://neutralino.js.org) instead, and on Linux spawned
+a separate, reparented Chrome process to get a spoofable user agent.
+`arktube_linux/` replaces that entirely with one native GTK3 +
+WebKit2GTK process — see `arktube_linux/README.md`'s "Why" section for
+the full reasoning, and `docs/bugs-caught/` for the class of bugs the
+old approach caused.
 
-Current priorities:
+Currently working (Linux only):
 
-* [ ] Launch YouTube inside Neutralino
-* [ ] Verify playback
-* [ ] Verify authentication/session persistence
-* [ ] Verify navigation
-* [ ] Investigate navigation interception
-* [ ] Preserve application state
-* [ ] Preserve scroll state where possible
-* [ ] Improve desktop window behavior
-* [ ] Add native desktop integration
-* [ ] Add application-level settings
+* [x] Launches `youtube.com/tv` in a native GTK window
+* [x] TV/Leanback interface via a full user-agent + `navigator`/`screen`
+      identity replacement
+* [x] F11 fullscreen toggle, Escape to exit fullscreen, remembered
+      across restarts
+* [x] Home key navigates back to `/tv`'s root without a full reload
+* [x] Gamepad/remote input, remapped to keyboard events
+* [x] Cursor auto-hide after 10s idle
+* [x] Connectivity check with a "no internet" screen
+* [x] Boot splash, dismissed when the page actually finishes loading
+* [x] `.deb` package built and uploaded automatically by
+      `.github/workflows/arktube-linux.yml`
 
-The project will stay deliberately small until the underlying approach is proven.
+Not yet ported:
+
+* [ ] Tray icon / tray menu
+* [ ] Immersive Mode (fullscreen lockdown + devtools guard)
+* [ ] Windows / macOS builds
+* [ ] AppImage packaging
+
+The project will stay deliberately small until the underlying approach
+is proven on Linux, before any other platform is considered.
 
 ---
 
 ## Design
 
-The architecture starts with the smallest possible layer:
+The architecture is the smallest layer that gets a spoofable user agent
+and a single, native, cross-compositor (X11 + Wayland) window:
 
 ```text
 ┌─────────────────────────────┐
-│        Neutralino           │
+│      GTK3 process           │
 │                             │
 │   ┌─────────────────────┐   │
-│   │      WebView         │   │
+│   │   WebKit2GTK WebView │   │
 │   │                     │   │
-│   │       YouTube       │   │
+│   │  youtube.com/tv     │   │
 │   │                     │   │
 │   └─────────────────────┘   │
 │                             │
-│      Desktop integration    │
+│   window chrome, keyboard,  │
+│   splash/no-internet UI     │
 └─────────────────────────────┘
 ```
 
-Over time, desktop-specific functionality can be introduced without replacing the YouTube experience.
-
-The long-term architecture is intended to remain framework-independent.
+Over time, desktop-specific functionality can be introduced without
+replacing the YouTube experience.
 
 ---
 
 ## Development
 
+See `arktube_linux/README.md` for full build instructions. In short:
+
 ### Requirements
 
-* Node.js
-* npm
-* Neutralinojs CLI
+* CMake ≥ 3.16, a C11 compiler
+* GTK3 development headers (`libgtk-3-dev` on Debian/Ubuntu)
+* WebKit2GTK development headers (`libwebkit2gtk-4.1-dev` on
+  Debian/Ubuntu)
 
-Install the CLI:
-
-```bash
-npm install -g @neutralinojs/neu
-```
-
-Neutralino provides an official `neu` CLI for creating, running, and building applications.
-
-### Run
+### Build and run
 
 ```bash
-neu run
+cd arktube_linux
+cmake -B build -S .
+cmake --build build
+./build/arktube_linux
 ```
 
-### Build
+`cmake --build` copies `resources/` next to the built binary
+automatically, so the build directory is runnable as-is.
+
+### Install
 
 ```bash
-neu build
+cmake --install build --prefix /usr/local
 ```
 
-Neutralino's build process is intentionally lightweight and does not require bundling an entire Chromium runtime into the application.
+Installs the binary, `resources/` (as
+`share/arktube_linux/resources/`), the `.desktop` entry, and the app
+icon, matching a normal Linux `/usr` layout.
 
-### Linux: building the AppImage
+### CI
 
-```bash
-cd ARKtube/
-neu update                       # fetch the pinned 6.8.0 binaries
-./packaging/linux/build-appimage.sh
-```
-
-This produces a self-contained `ARKtube-x86_64.AppImage` that embeds its
-resources and ships an `AppRun` wrapper. Don't hand-wrap the raw
-`neutralino-linux_x64` binary in an AppImage yourself — see
-`docs/BUGS-CAUGHT.md` for why that reliably crashes on launch, and what
-the wrapper does about it.
-
-### Linux: building the .deb
-
-```bash
-cd ARKtube/
-neu update                       # fetch the pinned 6.8.0 binaries
-./packaging/linux/build-deb.sh
-```
-
-Produces `ARKtube-<version>-amd64.deb`, installable with
-`sudo apt install ./ARKtube-<version>-amd64.deb`. It installs a launcher
-at `/usr/bin/arktube`, a `.desktop` entry, and an icon, and points
-Neutralino's writable `.tmp` directory at `~/.local/share/ARKtube` the
-same way the AppImage's `AppRun` does.
-
-### Windows: building the .exe
-
-```powershell
-cd ARKtube/
-neu update                       # fetch the pinned 6.8.0 binaries
-./packaging/windows/build-exe.ps1
-```
-
-Produces `ARKtube-<version>-windows-x64.zip` containing `ARKtube.exe`
-(resources are embedded into the binary at build time, so there's
-nothing else needed to run it) plus `ARKtube.bat` / `Launch-ARKtube.ps1`.
-**Run `ARKtube.bat`, not `ARKtube.exe` directly** - the wrapper points
-Neutralino at a writable per-user data dir and cleans up the detached
-chrome-mode child process on exit (see
-`packaging/windows/Launch-ARKtube.ps1` for why that matters).
-
-### macOS: building the .dmg
-
-```bash
-cd ARKtube/
-neu update                       # fetch the pinned 6.8.0 binaries
-./packaging/macos/build-dmg.sh
-```
-
-Produces `ARKtube-<version>-macos.dmg` containing `ARKtube.app` (with an
-`Applications` symlink for drag-to-install). The app launches through a
-small wrapper that points Neutralino's writable `.tmp` directory at
-`~/Library/Application Support/ARKtube`, since `/Applications` itself
-isn't writable by a normal user.
-
-The `.deb`, the Windows `.exe`, and the macOS `.dmg` are all also built
-automatically by `.github/workflows/stage0.yml` on every push to
-`main` and are downloadable from that workflow run's Artifacts
-section. The AppImage is not currently part of that automated
-pipeline — build it locally with the script above.
+`.github/workflows/arktube-linux.yml` builds the binary, installs it
+into a staging prefix, and packages that prefix into a `.deb` on every
+push to `main`, uploading all three as workflow artifacts. It does not
+currently build an AppImage, a Windows build, or a macOS build.
 
 ### Controller / remote support
 
-`resources/js/app-init.js` polls the standard Gamepad API and re-dispatches
-D-pad, stick, and face-button input as the same `ArrowUp/Down/Left/Right`,
-`Enter`, `Escape`, and `Home` key events the keyboard handler already
-understands — so any game controller, or any remote that a platform
-exposes to the browser as a HID gamepad, drives the same youtube.com/tv
-navigation a keyboard does, with no separate input path to maintain.
-Connect/disconnect events are logged via `debug.log` for troubleshooting.
+`resources/js/user-script.js` polls the standard Gamepad API and
+re-dispatches D-pad, stick, and face-button input as the same
+`ArrowUp/Down/Left/Right`, `Enter`, `Escape`, and `Home` key events the
+keyboard handler already understands — so any game controller, or any
+remote that a platform exposes to the browser as a HID gamepad, drives
+the same `youtube.com/tv` navigation a keyboard does, with no separate
+input path to maintain. Connect/disconnect events are logged to the
+console for troubleshooting.
 
-### Single-process app, not a separate browser window
+### Single-process app
 
-ARKtube's `defaultMode` is `window` (see `neutralino.config.json`), so
-YouTube loads inside Neutralino's own embedded webview — WebKitGTK on
-Linux, WebView2 on Windows, WKWebView on macOS — in the *same process*
-as the rest of the app, like any normal native desktop application.
-Closing ARKtube closes the whole thing; there's no second window or
-process hanging around after it.
-
-An earlier revision used `defaultMode: "chrome"`, which spawns
-Chrome/Chromium/Edge as a **separate, fully-detached child process** and
-loads YouTube in that instead — the Neutralino server itself is just a
-thin controller relaying window-lifecycle events to it. That's what let
-that child process get orphaned on anything but a clean in-app quit (see
-`docs/BUGS-CAUGHT.md` §5–§9 for the full history and the launcher-level
-workarounds that were needed to paper over it). Moving to window mode
-removes that entire class of problem rather than continuing to mitigate
-it — see `docs/BUGS-CAUGHT.md` §9 for the one real trade-off this
-brings (window mode can only *extend*, not fully replace, the webview's
-user agent, which chrome mode used to spoof a TV/Leanback identity) and
-how to switch back if you hit it.
+`arktube_linux` loads `youtube.com/tv` inside its own WebKit2GTK
+WebView, in the *same process* as the rest of the app, like any normal
+native desktop application. Closing the window quits the whole thing;
+there's no second window or process left running afterward.
 
 ### Linux: hardware-accelerated playback
 
-ARKtube's webview is WebKitGTK, the same engine GNOME Web uses, and the
-same playback stack Firefox's GTK build ultimately hands off to for
-VA-API decode. For smooth, hardware-accelerated YouTube playback
-(comparable to Firefox), install the full GStreamer plugin set:
+`arktube_linux`'s webview is WebKitGTK, the same engine GNOME Web uses,
+and the same playback stack Firefox's GTK build ultimately hands off to
+for VA-API decode. `webkit_settings_set_hardware_acceleration_policy()`
+is set explicitly to `ALWAYS` in `src/main.c`, but smooth,
+hardware-accelerated playback still depends on the system having the
+full GStreamer plugin set installed:
 
 ```bash
 # Debian/Ubuntu
@@ -308,9 +270,10 @@ sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
 Without `gstreamer1.0-plugins-bad`, subtitles fall back to a degraded
 path ("WebKit wasn't able to find a WebVTT encoder"). Without
 `gstreamer1.0-vaapi` and `gstreamer1.0-gl`, video decode and compositing
-run entirely on the CPU. See `docs/BUGS-CAUGHT.md` for the full
-explanation, including how to pick the right `LIBVA_DRIVER_NAME` for
-your GPU.
+run entirely on the CPU. See `docs/bugs-caught/BUGS-CAUGHT.md` for the
+background this was originally diagnosed against (the earlier
+Neutralino-based build), including how to pick the right
+`LIBVA_DRIVER_NAME` for your GPU — the same guidance still applies here.
 
 ---
 
@@ -318,19 +281,22 @@ your GPU.
 
 ### 01 — It opens
 
-YouTube launches inside a native desktop window.
+YouTube's TV interface launches inside a native desktop window. ✅
 
 ### 02 — It works
 
-Playback, search, authentication, navigation and sessions work normally.
+Playback, search, authentication, navigation and sessions work normally. ✅
 
 ### 03 — It feels native
 
-Window state, keyboard shortcuts, menus and desktop integration are added.
+Window state (fullscreen persistence), input remapping and desktop
+integration (`.desktop` entry, icon) are in place. Tray icon and
+Immersive Mode lockdown are still open.
 
 ### 04 — It stays alive
 
-Navigation becomes persistent and unnecessary document-level reloads are reduced.
+Navigation is already persistent within the single WebView; further
+reducing unnecessary reloads remains an open area.
 
 ### 05 — It disappears
 
@@ -360,7 +326,7 @@ Change the shell.
                   existing UX
                         │
                  ┌──────▼───────┐
-                 │  Neutralino  │
+                 │ GTK3+WebKit2GTK│
                  └──────┬───────┘
                         │
                   desktop app
@@ -370,59 +336,66 @@ The project should add as little as possible.
 
 If YouTube already solves a problem, let YouTube solve it.
 
-If the desktop needs something YouTube doesn't provide, add the smallest layer necessary.
+If the desktop needs something YouTube doesn't provide, add the
+smallest layer necessary.
 
 ---
 
-## Architecture: How the App Initializes
+## Architecture: how the app initializes
 
-### Key Files
+### Key files
 
-* **`neutralino.config.json`** — Application configuration (window mode vs. chrome mode)
-* **`resources/js/app-init.js`** — Injected into YouTube's page, handles window control and tray menu
-* **`resources/index.html`** — Template-only, not served in production (documentRoot is null)
-* **`resources/js/main.js`** — Dev-only, for testing with `resources/index.html`
+* **`arktube_linux/src/main.c`** — window/webview creation, user-agent
+  and hardware-acceleration setup, fullscreen handling, the
+  connectivity check, and the boot-splash / no-internet overlays
+* **`arktube_linux/resources/js/user-script.js`** — injected at
+  document-start into every frame of `youtube.com/tv`: the
+  `navigator`/`screen` identity spoof, Home-key SPA navigation,
+  gamepad/remote-to-keyboard remapping, and cursor auto-hide
+* **`arktube_linux/packaging/arktube-linux.desktop`** — the installed
+  `.desktop` launcher entry
+* **`arktube_linux/CMakeLists.txt`** — build and install rules
 
-### Initialization Flow
+### Initialization flow
 
-1. Neutralino starts with `url: "https://www.youtube.com/tv#/"` (external YouTube, not local resources)
-2. Neutralino injects `resources/js/app-init.js` into the YouTube page
-3. `app-init.js` initializes Neutralino API with error handling
-4. Event listeners are registered for window close and tray menu clicks
-5. Keyboard shortcuts (F11 for fullscreen, Escape for exit) are wired up
+1. `main()` creates the GTK window (maximized by default, or
+   fullscreen if that was the state when the app last quit) and shows
+   it immediately.
+2. A background thread checks internet connectivity by attempting a
+   raw TCP connection to `8.8.8.8:53`, independently of and before any
+   WebView load.
+3. While offline, a full-bleed "no internet" screen is shown in place
+   of the browser; the check keeps retrying every few seconds.
+4. Once connectivity is confirmed, the WebView is pointed at
+   `https://www.youtube.com/tv#/` and a branded boot splash (logo +
+   spinner) is shown on top of it.
+5. `user-script.js` is injected at document-start, ahead of any of the
+   page's own scripts, so the user-agent and `navigator`/`screen` spoof
+   is in place before the page's bootstrap JS ever reads it.
+6. The splash is dismissed the moment the WebView reports
+   `WEBKIT_LOAD_FINISHED` (with a 20-second defensive ceiling in case
+   that event never fires).
 
-### Why `documentRoot` is Null
+### Why the TV/Leanback interface
 
-The app loads YouTube directly as an external URL. The `documentRoot: "/resources/"` would only be used if `url` pointed to a local page (like `/resources/#index`). Since we're using an external URL, we set `documentRoot` to `null` to avoid confusion.
+`youtube.com/tv` is designed for D-pad/remote navigation rather than a
+mouse-and-keyboard desktop browser, which is what makes it a good fit
+for a persistent, always-on-top-feeling desktop shell. Getting YouTube
+to reliably serve that interface requires more than a User-Agent HTTP
+header: `youtube.com/tv`'s own bootstrap JS also reads
+`navigator.userAgent`, `navigator.platform`, `navigator.maxTouchPoints`
+and `screen.*` directly, so `user-script.js` patches those on the
+relevant prototypes before the page's own scripts run — see the
+comments in that file for why each property is patched the way it is.
 
-### Production vs. Development
-
-* **Production**: Uses YouTube TV interface with `app-init.js` injected for native controls
-* **Development**: Can temporarily change `url` to `"/resources/#index"` to test with local `index.html` and `main.js`
-
-### Chrome Mode vs. Window Mode
-
-`window` mode is the default (see "Single-process app, not a separate
-browser window" above and `docs/BUGS-CAUGHT.md` §9). Both modes still
-include `app-init.js` injection and support for:
-* Tray menu (VERSION, QUIT)
-* Window close handling
-* Fullscreen toggle (F11)
-
-Chrome mode additionally:
-* Launches with `--start-fullscreen` and a full PS4/Leanback user-agent
-  override (a full replacement, unlike window mode's `extendUserAgentWith`,
-  which can only append to the real user agent)
-* Blocks filesystem access for security
-* Runs YouTube in a separate, detached browser process rather than
-  Neutralino's own webview — see `docs/BUGS-CAUGHT.md` §5–§9 for what
-  that costs in process-lifecycle complexity
 ---
 
-This project contains original code written for the desktop shell and application layer.
+This project contains original code written for the desktop shell and
+application layer.
 
 YouTube is a trademark of Google LLC.
 
-This project is independent and is not affiliated with or endorsed by Google or YouTube.
+This project is independent and is not affiliated with or endorsed by
+Google or YouTube.
 
 See the repository license for the licensing terms of this project.
