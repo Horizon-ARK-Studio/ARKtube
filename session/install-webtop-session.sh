@@ -7,17 +7,18 @@
 # docs/STAGE-2-SESSION-LIFECYCLE.md for what each part below is fixing
 # and how it was verified.
 #
-# Requires: ARKtube already installed as a .deb (so `arktube` is on
-# PATH — see main's packaging/linux/build-deb.sh). This script does not
-# build or install ARKtube itself; see the root README's "Responsibilities"
-# section for why that boundary matters.
+# Requires: ARKtube already built/installed from main (so `arktube_linux`
+# is on PATH — see main's arktube_linux/CMakeLists.txt, which
+# `cmake --install .` puts at $prefix/bin/arktube_linux). This script
+# does not build or install ARKtube itself; see the root README's
+# "Responsibilities" section for why that boundary matters.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if ! command -v arktube >/dev/null 2>&1; then
-    echo "warning: 'arktube' is not on PATH yet." >&2
-    echo "         Install ARKtube's .deb first, then re-run this script." >&2
+if ! command -v arktube_linux >/dev/null 2>&1; then
+    echo "warning: 'arktube_linux' is not on PATH yet." >&2
+    echo "         Build and install ARKtube from main first, then re-run this script." >&2
 fi
 
 echo "==> Installing GNOME Kiosk + the script-session package"

@@ -13,10 +13,15 @@
 # writing out its own placeholder example. So this script *is* the
 # kiosk's managed application, from GNOME Kiosk's point of view.
 #
-# `arktube` is the launcher a .deb install of ARKtube puts on PATH
-# (see main's packaging/linux/build-deb.sh) — it already handles
-# NL_PATH, stale-Chrome cleanup, and its own EXIT/INT/TERM trap, so
-# nothing further needs to happen here.
+# The native port's binary is `arktube_linux` (see main's
+# arktube_linux/CMakeLists.txt, which installs it to $prefix/bin, and
+# packaging/arktube-linux.desktop's Exec= line) — not `arktube`, which
+# was the wrapper script the old Neutralino/embedded-Chrome .deb build
+# put on PATH (NL_PATH setup, stale-Chrome cleanup, its own EXIT/INT/
+# TERM trap). That build was removed from main outright ("Removed
+# neutralino build" — it's being replaced with a native port per
+# platform), taking the `arktube` wrapper with it, so nothing here
+# needs to reproduce what it used to handle.
 #
 # No respawn logic here on purpose: the systemd unit that runs this
 # script (org.gnome.Kiosk.Script.service) already has Restart=always,
@@ -91,4 +96,4 @@ if [ "${XDG_SESSION_TYPE:-}" = "x11" ]; then
     fi
 fi
 
-exec arktube
+exec arktube_linux
