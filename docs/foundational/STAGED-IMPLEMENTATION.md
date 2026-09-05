@@ -206,6 +206,56 @@ stated, not hidden — see `docs/STAGE-7-VISIBILITY-AND-CURSOR.md`.
 
 ---
 
+## Stage 8 — TV-style system overlay
+
+**Question:** Stage 6/7 gave the session real system controls, but
+modeled them on GNOME Shell's own topbar and quick-settings popover —
+the right functionality, the wrong reference point for a TV appliance
+navigated with a remote/controller rather than a desktop mouse. Can
+that same functionality be rebuilt around a TV-style settings surface
+instead, without regressing anything Stage 6/7 already delivered?
+
+This stage wasn't in the original plan either; it was added once it
+became clear that a GNOME Shell-shaped panel was a mistake independent
+of whether the controls behind it worked — see
+`docs/STAGE-8-TV-STYLE-OVERLAY.md`'s own "Why this stage exists" for
+the full reasoning, and `docs/foundational/CAGE-MIGRATION.md` for the
+same root cause showing up one layer down, in the compositor choice.
+
+Steps:
+
+* Replace `session/topbar/`'s GNOME-styled strip with
+  `session/overlay/`: a small corner affordance that expands into a
+  panel of large, remote-navigable tiles (Network, Picture, Sound,
+  Bluetooth) plus an always-visible brightness/volume slider dock,
+  modeled on the *style and intent* of Google/Android TV's own settings
+  overlay rather than copied from it directly.
+* Implement Ethernet-priority, Wi-Fi-fallback network logic exactly as
+  specified: Ethernet wins when both are connected and stable; an
+  unstable or absent Ethernet link falls back to Wi-Fi.
+* Ship only the essentials as real, working controls this stage —
+  Network status/scan/connect, brightness, and volume — and make
+  Picture, Sound, and Bluetooth reachable-but-placeholder tiles rather
+  than inventing backends for them before there's a real spec for each.
+* Keep the battery pill conditional on an actual battery being present
+  (laptop), not shown at all on hardware with none (a fixed-purpose TV
+  box).
+
+**Exit condition:** matches `docs/STAGE-8-TV-STYLE-OVERLAY.md`'s own
+exit condition — a user can reach live network/brightness/volume status
+and control them from the overlay, with Ethernet/Wi-Fi switching
+matching the spec above, and Picture/Sound/Bluetooth clearly marked as
+not yet built rather than broken or hidden.
+
+---
+
+> **Compositor migration (GNOME Kiosk → Cage)** is tracked separately in
+> `docs/foundational/CAGE-MIGRATION.md`, with its own stage numbering
+> (Stage 9 onward) picking up after Stage 8 above. It's kept out of this
+> document because it's a change to the layer underneath everything
+> above, not a continuation of the session-feature work this document
+> tracks stage by stage.
+
 ## Non-goals of this staging
 
 This staging does not include:

@@ -1,5 +1,14 @@
 # Stage 6 — Offline system topbar
 
+> **Superseded by Stage 8.** The GNOME Shell-styled topbar this doc
+> describes (`session/topbar/`) has been removed and replaced by a
+> TV-style system overlay — see
+> `docs/STAGE-8-TV-STYLE-OVERLAY.md` and
+> `docs/foundational/CAGE-MIGRATION.md` for why a desktop-panel idiom
+> was the wrong reference point for a remote-navigated TV appliance.
+> Left in place as the historical implementation record for what Stage
+> 6 actually built and verified at the time.
+
 **Status:** Implemented at the code level. Not yet click-tested against a
 real GDM session, for the same reason every prior stage carries that
 caveat — no display manager in this environment.

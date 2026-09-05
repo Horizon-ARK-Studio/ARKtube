@@ -61,25 +61,26 @@ install -Dm644 \
     "${HOME}/.config/systemd/user/org.gnome.Kiosk.Script.service.d/override.conf"
 systemctl --user daemon-reload 2>/dev/null || true
 
-# Stage 6 (see docs/STAGE-6-OFFLINE-TOPBAR.md): the offline system topbar.
-# pywebview's GTK backend needs PyGObject and WebKit2GTK from apt — pip
-# alone can't provide those. The tray/control CLI tools it shells out to
-# (nmcli, wpctl, brightnessctl, upower) are each optional at runtime —
-# see topbar.py's `run()` — but are installed here too so the common case
-# works out of the box rather than silently degrading on a fresh Noble
-# install.
-echo "==> Installing the offline topbar's system dependencies"
+# Stage 8 (see docs/STAGE-8-TV-STYLE-OVERLAY.md): the TV-style system
+# overlay, which replaces Stage 6/7's GNOME-styled topbar. Same runtime
+# dependencies as before — pywebview's GTK backend needs PyGObject and
+# WebKit2GTK from apt, which pip can't provide — and the same
+# CLI tools it shells out to (nmcli, wpctl, brightnessctl, upower) are
+# each optional at runtime, see overlay.py's `run()`, but are installed
+# here too so the common case works out of the box rather than silently
+# degrading on a fresh Noble install.
+echo "==> Installing the system overlay's dependencies"
 sudo apt-get install -y \
     python3-pip python3-gi gir1.2-webkit2-4.1 \
     network-manager wireplumber pulseaudio-utils brightnessctl upower
-pip install --user --break-system-packages -r "${HERE}/topbar/requirements.txt"
+pip install --user --break-system-packages -r "${HERE}/overlay/requirements.txt"
 
-echo "==> Deploying the offline topbar"
-mkdir -p "${HOME}/.local/share/arktube-topbar/static"
-install -Dm755 "${HERE}/topbar/topbar.py" "${HOME}/.local/share/arktube-topbar/topbar.py"
-install -Dm644 "${HERE}/topbar/static/index.html" "${HOME}/.local/share/arktube-topbar/static/index.html"
-install -Dm644 "${HERE}/topbar/static/style.css" "${HOME}/.local/share/arktube-topbar/static/style.css"
-install -Dm644 "${HERE}/topbar/static/app.js" "${HOME}/.local/share/arktube-topbar/static/app.js"
+echo "==> Deploying the system overlay"
+mkdir -p "${HOME}/.local/share/arktube-overlay/static"
+install -Dm755 "${HERE}/overlay/overlay.py" "${HOME}/.local/share/arktube-overlay/overlay.py"
+install -Dm644 "${HERE}/overlay/static/index.html" "${HOME}/.local/share/arktube-overlay/static/index.html"
+install -Dm644 "${HERE}/overlay/static/style.css" "${HOME}/.local/share/arktube-overlay/static/style.css"
+install -Dm644 "${HERE}/overlay/static/app.js" "${HOME}/.local/share/arktube-overlay/static/app.js"
 
 # Stage 7 (see docs/STAGE-7-VISIBILITY-AND-CURSOR.md): auto-hide the
 # mouse pointer after 10s idle on the xsessions/arktube.desktop (X11)
@@ -117,18 +118,16 @@ here to click through) — see docs/STAGE-1-SELECTABLE-SESSION.md,
 docs/STAGE-2-SESSION-LIFECYCLE.md, and docs/STAGE-3-INPUT-MAPPING.md for
 exactly what has and hasn't been confirmed.
 
-A system topbar now starts alongside ARKtube (clock, Wi-Fi, volume,
-brightness, battery, lock, and power), reachable without a network
-connection. See docs/STAGE-6-OFFLINE-TOPBAR.md for what backs each
-control and what's still open.
+A small TV-style system overlay now starts alongside ARKtube (network,
+volume, brightness, battery, lock, and power), reachable without a
+network connection. It replaces the earlier GNOME-styled topbar -- see
+docs/STAGE-8-TV-STYLE-OVERLAY.md for what backs each control, what's
+essential this stage (brightness, volume, Wi-Fi/Ethernet) versus a
+placeholder (Picture, Sound, Bluetooth), and what's still open.
 
-The topbar now also hides itself while ARKtube's own Immersive Mode is
-on and the machine is online, and auto-reveals itself the instant
-either stops being true (Immersive Mode turned off, or connectivity
-drops) -- so it's never actually out of reach. On the X11 session
-(xsessions/arktube.desktop) the mouse pointer also hides itself after
-10s of no movement or clicks; on the primary Wayland session this is
-not yet possible from Webtop at all -- see
+The mouse pointer also hides itself after 10s of no movement or clicks
+on the X11 session (xsessions/arktube.desktop) only; on the primary
+Wayland session this is not yet possible from Webtop at all -- see
 docs/STAGE-7-VISIBILITY-AND-CURSOR.md for why, and what fixing it for
 real would require.
 EOF

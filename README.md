@@ -12,9 +12,10 @@ Webtop provides the pieces needed to:
 
 * select **ARKtube** from the Ubuntu login screen
 * enter the native ARKtube session without starting the full GNOME Shell desktop
-* provide the required session controls, including a small offline
-  system topbar for volume, brightness, Wi-Fi, lock, logout, and power —
-  see `docs/STAGE-6-OFFLINE-TOPBAR.md`
+* provide the required session controls, including a small offline,
+  TV-style system overlay for network (Wi-Fi/Ethernet), volume,
+  brightness, lock, logout, and power — see
+  `docs/STAGE-8-TV-STYLE-OVERLAY.md`
 * map the required buttons and keyboard actions
 * allow the session to be locked
 * allow the user to log out

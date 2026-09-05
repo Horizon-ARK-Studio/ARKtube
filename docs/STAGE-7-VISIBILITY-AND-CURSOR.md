@@ -1,5 +1,15 @@
 # Stage 7 — Topbar visibility (Immersive Mode / offline) and cursor auto-hide
 
+> **Partially superseded by Stage 8.** This doc's cursor auto-hide half
+> (`unclutter-xfixes` in `session/gnome-kiosk-script`) is unaffected and
+> still applies as-is. Its topbar-visibility half described a behavior
+> of `session/topbar/topbar.py`, which Stage 8 removed in favor of
+> `session/overlay/overlay.py` — see `docs/STAGE-8-TV-STYLE-OVERLAY.md`.
+> The Immersive-Mode-aware auto-hide/reveal behavior this doc describes
+> has **not** been ported to the new overlay yet; it's an open item in
+> Stage 8's own doc rather than silently dropped. Left in place as the
+> historical implementation record for what Stage 7 actually built.
+
 **Status:** Implemented at the code level. Same on-hardware caveat as
 every prior stage (see "What was not verified" below) — no display
 manager in this environment.

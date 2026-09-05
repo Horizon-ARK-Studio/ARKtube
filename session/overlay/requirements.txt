@@ -1,4 +1,4 @@
-# session/topbar — Python dependencies.
+# session/overlay — Python dependencies.
 #
 # pywebview's GTK backend (used here, to match the GTK/WebKitGTK stack
 # GNOME Kiosk itself is built on) additionally needs system packages that

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARKtube Overlay</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Collapsed state: a small, always-present corner affordance —
+       the "style and intent" of Google/Android TV's own status
+       cluster, not a full-width GNOME-style top bar. This is the only
+       thing on screen until it's activated. -->
+  <div id="launcher" tabindex="0" role="button" aria-label="Open system settings">
+    <span id="launcher-network-icon" class="icon" data-icon="ethernet"></span>
+    <span id="launcher-volume-icon" class="icon" data-icon="volume"></span>
+    <span id="launcher-battery" class="battery-pill hidden">
+      <span class="icon" data-icon="battery"></span>
+      <span id="launcher-battery-pct">--%</span>
+    </span>
+  </div>
+
+  <!-- Expanded state: scrim + panel. Hidden until the launcher (or a
+       remote/keyboard "select") activates it. -->
+  <div id="scrim" class="hidden"></div>
+
+  <div id="panel" class="hidden" role="dialog" aria-label="System settings">
+
+    <div class="panel-topline">
+      <span id="panel-battery" class="battery-pill hidden">
+        <span class="icon" data-icon="battery"></span>
+        <span id="panel-battery-pct">--%</span>
+      </span>
+      <button id="power-toggle" class="corner-btn" type="button" aria-label="Power">
+        <span class="icon" data-icon="power"></span>
+      </button>
+    </div>
+
+    <div id="power-menu" class="power-menu hidden">
+      <button id="power-lock" class="ghost-btn" type="button">Lock</button>
+      <button id="power-logout" class="ghost-btn" type="button">Log Out</button>
+      <button id="power-reboot" class="ghost-btn" type="button">Restart</button>
+      <button id="power-poweroff" class="ghost-btn danger" type="button">Power Off</button>
+    </div>
+
+    <!-- Tile row: the four settings surfaces named by the product
+         spec. Only "network" has a real content pane this stage; the
+         other three render the shared placeholder. -->
+    <div id="tile-row" class="tile-row" role="tablist">
+      <button class="tile active" data-tile="network" role="tab" aria-selected="true" tabindex="0">
+        <span class="tile-icon" data-icon="ethernet"></span>
+        <span class="tile-label">Network</span>
+        <span id="tile-network-sub" class="tile-sub">—</span>
+      </button>
+      <button class="tile" data-tile="picture" role="tab" aria-selected="false" tabindex="-1">
+        <span class="tile-icon" data-icon="picture"></span>
+        <span class="tile-label">Picture</span>
+        <span class="tile-sub">Settings</span>
+      </button>
+      <button class="tile" data-tile="sound" role="tab" aria-selected="false" tabindex="-1">
+        <span class="tile-icon" data-icon="sound"></span>
+        <span class="tile-label">Sound</span>
+        <span class="tile-sub">Settings</span>
+      </button>
+      <button class="tile" data-tile="bluetooth" role="tab" aria-selected="false" tabindex="-1">
+        <span class="tile-icon" data-icon="bluetooth"></span>
+        <span class="tile-label">Bluetooth</span>
+        <span class="tile-sub">Settings</span>
+      </button>
+    </div>
+
+    <!-- Content pane: swapped based on the active tile. -->
+    <div id="content-pane" class="content-pane">
+
+      <section id="content-network" class="content" data-content="network">
+        <div class="network-status">
+          <span class="network-status-icon" id="network-status-icon" data-icon="ethernet"></span>
+          <div class="network-status-text">
+            <div id="network-status-label" class="network-status-label">Network</div>
+            <div id="network-status-sub" class="network-status-sub">Checking…</div>
+          </div>
+          <button id="wifi-radio-toggle" class="pill-toggle" type="button">
+            <span>Wi-Fi</span>
+            <span class="switch"><span class="switch-knob"></span></span>
+          </button>
+        </div>
+
+        <div class="network-list-wrap">
+          <div class="network-list-header">Available Networks</div>
+          <ul id="network-list" class="network-list">
+            <li class="network-empty">Scanning…</li>
+          </ul>
+        </div>
+
+        <form id="wifi-connect-form" class="wifi-connect-form hidden">
+          <div id="wifi-connect-ssid" class="wifi-connect-ssid">—</div>
+          <input id="wifi-connect-password" type="password" placeholder="Password" autocomplete="off">
+          <div class="wifi-connect-actions">
+            <button type="button" id="wifi-connect-cancel" class="ghost-btn">Cancel</button>
+            <button type="submit" id="wifi-connect-submit" class="ghost-btn primary">Connect</button>
+          </div>
+          <div id="wifi-connect-status" class="wifi-connect-status"></div>
+        </form>
+      </section>
+
+      <!-- Shared "not built yet" placeholder for Picture/Sound/Bluetooth.
+           Kept as one element with swapped text/icon rather than three
+           near-identical sections — see PLACEHOLDER_TILES in overlay.py. -->
+      <section id="content-placeholder" class="content hidden" data-content="placeholder">
+        <div class="placeholder">
+          <span id="placeholder-icon" class="placeholder-icon" data-icon="picture"></span>
+          <div id="placeholder-title" class="placeholder-title">Picture settings</div>
+          <div class="placeholder-body">This settings panel hasn't been built yet.</div>
+          <div class="placeholder-note">Coming in a later stage.</div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- Always-visible essentials, regardless of which tile is active:
+         brightness and volume. -->
+    <div class="slider-dock">
+      <div class="slider-row">
+        <span class="slider-icon" data-icon="brightness"></span>
+        <input id="brightness-slider" type="range" min="1" max="100" value="50" class="slider">
+        <span id="brightness-value" class="slider-value">--%</span>
+      </div>
+      <div class="slider-row">
+        <button id="volume-mute" class="slider-icon-btn" type="button" aria-label="Mute">
+          <span id="volume-icon" class="slider-icon" data-icon="volume"></span>
+        </button>
+        <input id="volume-slider" type="range" min="0" max="100" value="50" class="slider">
+        <span id="volume-value" class="slider-value">--%</span>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

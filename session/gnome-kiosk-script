@@ -26,19 +26,24 @@
 # Stage 2's job — see the "GNOME Kiosk 46 vs 50" note in
 # docs/STAGE-1-SELECTABLE-SESSION.md.
 #
-# Stage 6 (see docs/STAGE-6-OFFLINE-TOPBAR.md) starts the offline system
-# topbar here, backgrounded, before the `exec` below. It's launched from
-# this script rather than a separate systemd unit or XDG autostart entry
-# specifically so it's forked *into this same process*, before that
-# process image is replaced by `exec arktube` — meaning it lands in
-# org.gnome.Kiosk.Script.service's own cgroup for free, and Stage 4's
-# `KillMode=control-group` (session/systemd/.../override.conf) reaps it
-# on logout along with everything else, with no second lifecycle to
-# maintain. If the topbar isn't installed (e.g. this branch's own
-# install script hasn't been re-run since Stage 6 landed), this silently
-# does nothing rather than blocking ARKtube from starting.
-if [ -x "${HOME}/.local/share/arktube-topbar/topbar.py" ]; then
-    python3 "${HOME}/.local/share/arktube-topbar/topbar.py" &
+# Stage 6 started an offline system topbar here, modeled on GNOME
+# Shell's own top bar. Stage 8 (see docs/STAGE-8-TV-STYLE-OVERLAY.md)
+# replaces it with a TV-style system overlay instead — same job
+# (volume, brightness, network, lock, logout, power, reachable with no
+# network connection), different reference point, since a GNOME-shaped
+# panel was the wrong idiom for a remote-navigated TV appliance. It's
+# still launched from this script rather than a separate systemd unit
+# or XDG autostart entry, for the same reason as before: forked *into
+# this same process*, before that process image is replaced by `exec
+# arktube` below, it lands in org.gnome.Kiosk.Script.service's own
+# cgroup for free, and Stage 4's `KillMode=control-group`
+# (session/systemd/.../override.conf) reaps it on logout along with
+# everything else, with no second lifecycle to maintain. If the
+# overlay isn't installed (e.g. this branch's own install script
+# hasn't been re-run since Stage 8 landed), this silently does nothing
+# rather than blocking ARKtube from starting.
+if [ -x "${HOME}/.local/share/arktube-overlay/overlay.py" ]; then
+    python3 "${HOME}/.local/share/arktube-overlay/overlay.py" &
 fi
 
 # Stage 7 (see docs/STAGE-7-VISIBILITY-AND-CURSOR.md): hide the mouse
