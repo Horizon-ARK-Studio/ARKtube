@@ -26,6 +26,7 @@ target_compile_options(arktube_linux PRIVATE
 target_link_libraries(arktube_linux PRIVATE
     ${GTK3_LIBRARIES}
     ${WEBKIT2GTK_LIBRARIES}
+    m
 )
 target_link_directories(arktube_linux PRIVATE
     ${GTK3_LIBRARY_DIRS}

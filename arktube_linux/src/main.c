@@ -51,6 +51,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdlib.h>
@@ -110,23 +111,43 @@
 
 /* Where the "Youtube tv app for desktop devices" tagline actually sits
    in boot-logo.png, measured directly off the artwork's pixels (left
-   edge, right edge, and bottom edge of the text) at native 1672x941 --
-   so the spinner below can be pinned centered under it and just below
-   it, instead of guessed. Since the artwork is now stretched
-   non-uniformly to fill the window, the spinner's position is
-   recomputed from these on every resize (see
-   arktube_splash_reposition_spinner() below) using independent
-   horizontal and vertical scale factors, rather than a single shared
-   scale the way a uniformly-scaled image would only need.
-   ARKTUBE_SPLASH_SPINNER_GAP_NATIVE is the vertical gap between the
-   text's bottom edge and the spinner, kept generous enough that the
-   spinner reads as clearly separate from the tagline rather than
-   crowding it. */
+   edge and right edge of the text) at native 1672x941 -- so the spinner
+   can be pinned centered under its horizontal midpoint instead of
+   guessed. Since the artwork is now stretched non-uniformly to fill the
+   window, the spinner's position is recomputed from these on every
+   resize (see arktube_splash_reposition_spinner() below) using
+   independent horizontal and vertical scale factors, rather than a
+   single shared scale the way a uniformly-scaled image would only need.
+
+   The spinner is deliberately *not* pinned just under the tagline's
+   bottom edge any more: that crowded the text instead of reading as its
+   own element. Vertically it's anchored to the artwork's bottom edge
+   instead, by ARKTUBE_SPLASH_SPINNER_BOTTOM_MARGIN_NATIVE -- chosen from
+   the actual pixel content of boot-logo.png (see the color-sampling
+   analysis that produced these numbers) so that, at this size, it sits
+   in the empty dark space below the wordmark and clear of the diagonal
+   red glow band, rather than overlapping it. That band's top edge
+   doesn't reach this x-range at all (it only intrudes past roughly
+   x=680 native, well right of the tagline's midpoint used below), so
+   this margin has real clearance on every side, not just a close miss. */
 #define ARKTUBE_SPLASH_TEXT_LEFT_NATIVE 172
 #define ARKTUBE_SPLASH_TEXT_RIGHT_NATIVE 881
-#define ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE 420
-#define ARKTUBE_SPLASH_SPINNER_GAP_NATIVE 46
-#define ARKTUBE_SPLASH_SPINNER_SIZE 30
+#define ARKTUBE_SPLASH_SPINNER_BOTTOM_MARGIN_NATIVE 160
+
+/* Native pixel size (unscaled -- kept fixed regardless of window size,
+   same as the spinner it replaces) of the branded spinner artwork
+   below. Sized well above the old 30px default GtkSpinner so it reads
+   as a deliberate piece of the composition instead of a stray dot. */
+#define ARKTUBE_SPLASH_SPINNER_SIZE 90
+
+/* How many degrees the spinner advances per animation tick, and how
+   often -- together giving one full revolution every
+   (360 / ARKTUBE_SPLASH_SPINNER_STEP_DEG) * ARKTUBE_SPLASH_SPINNER_INTERVAL_MS
+   milliseconds. 12 degrees / 30ms is 30 steps per revolution at roughly
+   33fps, about a 1-second-per-turn pace -- close to GtkSpinner's own
+   default cadence. */
+#define ARKTUBE_SPLASH_SPINNER_STEP_DEG 12.0
+#define ARKTUBE_SPLASH_SPINNER_INTERVAL_MS 30
 
 /* Connectivity check, done with plain BSD-socket syscalls (socket(2) /
    connect(2) / poll(2), no libcurl or libsoup dependency) rather than
@@ -456,7 +477,15 @@ static GtkWidget *arktube_create_stretch_image_area(const char *relative_resourc
    factors (allocation size / native size on each axis) rather than one
    shared scale -- because the image is no longer scaled uniformly, a
    single shared factor would drift off the tagline as soon as the
-   window's aspect ratio stopped matching the artwork's own 1672:941. */
+   window's aspect ratio stopped matching the artwork's own 1672:941.
+
+   Horizontally: centered on the tagline's own midpoint, not its left
+   edge -- subtracting half the spinner's fixed size is what actually
+   centers it there, rather than just starting the spinner at that
+   x-coordinate. Vertically: anchored to the *bottom* of the frame by
+   ARKTUBE_SPLASH_SPINNER_BOTTOM_MARGIN_NATIVE rather than hung just
+   under the text, so it reads as belonging to the composition as a
+   whole instead of crowding the tagline. */
 static void arktube_splash_reposition_spinner(GtkWidget *widget, GdkRectangle *allocation,
                                                gpointer user_data) {
     (void)widget;
@@ -471,16 +500,127 @@ static void arktube_splash_reposition_spinner(GtkWidget *widget, GdkRectangle *a
     gdouble text_center_native =
         (ARKTUBE_SPLASH_TEXT_LEFT_NATIVE + ARKTUBE_SPLASH_TEXT_RIGHT_NATIVE) / 2.0;
 
-    /* Centered *on* the tagline's own midpoint, not its left edge --
-       subtracting half the spinner's fixed size is what actually
-       centers it there, rather than just starting the spinner at that
-       x-coordinate. */
     gint margin_start = (gint)(text_center_native * scale_x) - (ARKTUBE_SPLASH_SPINNER_SIZE / 2);
-    gint margin_top = (gint)(
-        (ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE + ARKTUBE_SPLASH_SPINNER_GAP_NATIVE) * scale_y);
+    gint margin_top = allocation->height -
+        (gint)(ARKTUBE_SPLASH_SPINNER_BOTTOM_MARGIN_NATIVE * scale_y) -
+        ARKTUBE_SPLASH_SPINNER_SIZE;
 
     gtk_widget_set_margin_start(spinner, margin_start);
     gtk_widget_set_margin_top(spinner, margin_top);
+}
+
+/* Draws the current frame of the branded spinner: the pixbuf stashed on
+   this widget (see arktube_create_spinner_widget() below) rotated about
+   its own center by "arktube-angle" degrees. Rotating a pre-rasterized
+   pixbuf here, rather than re-rendering the SVG every frame, is what
+   keeps a ~33fps redraw cheap. */
+static gboolean arktube_spinner_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
+    (void)user_data;
+    GdkPixbuf *pixbuf = GDK_PIXBUF(g_object_get_data(G_OBJECT(widget), "arktube-pixbuf"));
+    if (!pixbuf) {
+        return FALSE;
+    }
+
+    gdouble angle = *(gdouble *)g_object_get_data(G_OBJECT(widget), "arktube-angle");
+    gint w = gdk_pixbuf_get_width(pixbuf);
+    gint h = gdk_pixbuf_get_height(pixbuf);
+
+    cairo_translate(cr, ARKTUBE_SPLASH_SPINNER_SIZE / 2.0, ARKTUBE_SPLASH_SPINNER_SIZE / 2.0);
+    cairo_rotate(cr, angle * G_PI / 180.0);
+    gdk_cairo_set_source_pixbuf(cr, pixbuf, -w / 2.0, -h / 2.0);
+    cairo_paint(cr);
+    return FALSE;
+}
+
+/* Timer callback (see g_timeout_add() in arktube_create_spinner_widget()
+   below): advances the rotation angle and repaints. Stops itself
+   (G_SOURCE_REMOVE) once the widget is gone -- the splash overlay is
+   destroyed the moment youtube.com/tv finishes loading (see
+   arktube_dismiss_splash()), and without this check the timer would
+   otherwise keep firing against a freed widget. */
+static gboolean arktube_spinner_tick(gpointer user_data) {
+    GtkWidget *widget = GTK_WIDGET(user_data);
+    if (!GTK_IS_WIDGET(widget)) {
+        return G_SOURCE_REMOVE;
+    }
+
+    gdouble *angle = (gdouble *)g_object_get_data(G_OBJECT(widget), "arktube-angle");
+    *angle = fmod(*angle + ARKTUBE_SPLASH_SPINNER_STEP_DEG, 360.0);
+    gtk_widget_queue_draw(widget);
+    return G_SOURCE_CONTINUE;
+}
+
+/* The branded loading spinner: an 8-blade pinwheel traced off an
+   internal design reference (contour-extracted so its curved "sail"
+   silhouette and 45-degree blade spacing are a faithful match, not a
+   guess) and recolored into ARKtube's own red/orange/black instead of
+   the reference's teal/blue/yellow, shipped as
+   resources/icons/arktube-spinner.svg. Rasterized once at
+   ARKTUBE_SPLASH_SPINNER_SIZE (so it stays crisp at the one size it's
+   ever drawn at) and then just rotated per frame in
+   arktube_spinner_draw() above, the same "pre-render once, transform
+   per frame" trade GtkSpinner itself makes internally.
+   Falls back to a plain (but re-tinted) GtkSpinner if the SVG can't be
+   loaded -- e.g. a minimal system missing the gdk-pixbuf SVG loader
+   (librsvg) -- so a missing icon loader degrades the *style* of the
+   loading indicator rather than losing it outright. */
+static GtkWidget *arktube_create_spinner_widget(void) {
+    gchar *path = arktube_find_resource("icons/arktube-spinner.svg");
+    GdkPixbuf *pixbuf = NULL;
+    if (path) {
+        GError *error = NULL;
+        pixbuf = gdk_pixbuf_new_from_file_at_scale(
+            path, ARKTUBE_SPLASH_SPINNER_SIZE, ARKTUBE_SPLASH_SPINNER_SIZE, TRUE, &error);
+        if (!pixbuf) {
+            g_warning("ARKtube: could not load 'icons/arktube-spinner.svg': %s",
+                      error ? error->message : "unknown error");
+            g_clear_error(&error);
+        }
+        g_free(path);
+    }
+
+    if (!pixbuf) {
+        GtkWidget *fallback = gtk_spinner_new();
+        gtk_widget_set_size_request(fallback, ARKTUBE_SPLASH_SPINNER_SIZE,
+                                     ARKTUBE_SPLASH_SPINNER_SIZE);
+        gtk_widget_set_halign(fallback, GTK_ALIGN_START);
+        gtk_widget_set_valign(fallback, GTK_ALIGN_START);
+        gtk_spinner_start(GTK_SPINNER(fallback));
+
+        GtkCssProvider *css = gtk_css_provider_new();
+        gtk_css_provider_load_from_data(
+            css, "spinner { color: #E8221A; }", -1, NULL);
+        gtk_style_context_add_provider(
+            gtk_widget_get_style_context(fallback),
+            GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(css);
+        return fallback;
+    }
+
+    GtkWidget *area = gtk_drawing_area_new();
+    gtk_widget_set_size_request(area, ARKTUBE_SPLASH_SPINNER_SIZE, ARKTUBE_SPLASH_SPINNER_SIZE);
+    gtk_widget_set_halign(area, GTK_ALIGN_START);
+    gtk_widget_set_valign(area, GTK_ALIGN_START);
+    /* Background must stay transparent so the boot-logo shows through
+       around the pinwheel's own silhouette. */
+    gtk_widget_set_app_paintable(area, TRUE);
+
+    g_object_set_data_full(G_OBJECT(area), "arktube-pixbuf", pixbuf, g_object_unref);
+    gdouble *angle = g_new0(gdouble, 1);
+    g_object_set_data_full(G_OBJECT(area), "arktube-angle", angle, g_free);
+
+    g_signal_connect(area, "draw", G_CALLBACK(arktube_spinner_draw), NULL);
+    guint tick_id = g_timeout_add(
+        ARKTUBE_SPLASH_SPINNER_INTERVAL_MS, arktube_spinner_tick, area);
+    /* g_timeout_add() itself already stops (via arktube_spinner_tick()'s
+       GTK_IS_WIDGET() check) once "area" is destroyed, but removing the
+       source explicitly on destroy avoids leaving it registered for the
+       few-hundred-ms window between the widget dying and its next
+       scheduled tick. */
+    g_signal_connect_swapped(area, "destroy", G_CALLBACK(g_source_remove),
+                              GUINT_TO_POINTER(tick_id));
+
+    return area;
 }
 
 /* Splash overlay: boot-logo.png stretched to exactly fill the window
@@ -533,16 +673,13 @@ static GtkWidget *arktube_create_splash_overlay(void) {
     }
     gtk_container_add(GTK_CONTAINER(card), image_area);
 
-    /* The "loading circle": pinned just under the tagline text, centered
-       under its midpoint. Repositioned on every resize of image_area
-       (see arktube_splash_reposition_spinner() above), since the
-       stretched image's scale changes with the window's own size. */
-    GtkWidget *spinner = gtk_spinner_new();
-    gtk_widget_set_size_request(spinner, ARKTUBE_SPLASH_SPINNER_SIZE,
-                                 ARKTUBE_SPLASH_SPINNER_SIZE);
-    gtk_widget_set_halign(spinner, GTK_ALIGN_START);
-    gtk_widget_set_valign(spinner, GTK_ALIGN_START);
-    gtk_spinner_start(GTK_SPINNER(spinner));
+    /* The branded loading spinner (see arktube_create_spinner_widget()
+       above): centered under the tagline's midpoint, anchored to the
+       bottom of the frame rather than hung directly under the text.
+       Repositioned on every resize of image_area (see
+       arktube_splash_reposition_spinner() above), since the stretched
+       image's scale changes with the window's own size. */
+    GtkWidget *spinner = arktube_create_spinner_widget();
     gtk_overlay_add_overlay(GTK_OVERLAY(card), spinner);
     g_signal_connect(image_area, "size-allocate",
                       G_CALLBACK(arktube_splash_reposition_spinner), spinner);
