@@ -29,11 +29,18 @@
     resources/js/user-script.js carrying over the parts of the old
     app-init.js that are pure page-side JS with no Neutralino API
     dependency (Home-key SPA navigation, cursor auto-hide, and the
-    gamepad/remote-to-keyboard remap). The tray icon, the on-screen
-    Immersive Mode lockdown, and persisted settings are intentionally
-    not ported yet -- they depended on Neutralino.storage/os.setTray
-    and need a native replacement (GKeyFile + AppIndicator or similar),
-    tracked as follow-up work rather than carried over as-is.
+    gamepad/remote-to-keyboard remap). The tray icon and the on-screen
+    Immersive Mode lockdown are intentionally not ported yet -- they
+    depended on Neutralino.os.setTray and need a native replacement
+    (AppIndicator or similar), tracked as follow-up work.
+
+    Persisted settings (the other Neutralino.storage-dependent piece
+    PORTING-NOTES.md flagged) are ported for the one setting that
+    currently needs it: whether the window was fullscreen last run, so
+    the F11 toggle survives a restart the same way it would have if the
+    old shell's window state had been wired up to Neutralino.storage.
+    It's a GKeyFile under g_get_user_config_dir(), the native fit that
+    doc's "Persisted settings generally" note already called out.
 */
 
 #include <gdk/gdkkeysyms.h>
@@ -58,6 +65,37 @@
 
 #define ARKTUBE_DEFAULT_WIDTH 1280
 #define ARKTUBE_DEFAULT_HEIGHT 720
+
+/* Splash screen shown on startup while the main window's WebView loads
+   youtube.com/tv underneath it. */
+#define ARKTUBE_SPLASH_DURATION_MS 5000
+#define ARKTUBE_SPLASH_WIDTH 860
+
+/* boot-logo.png is a fixed 1672x941 piece of artwork (the ARKtube
+   wordmark + tagline on the left, the character on the right), not a
+   small logo to float on blank space -- so the splash is the image
+   itself, edge to edge, at ARKTUBE_SPLASH_WIDTH, scaled down keeping
+   the 1672:941 aspect ratio. */
+#define ARKTUBE_SPLASH_LOGO_NATIVE_WIDTH 1672
+
+/* Where the "Youtube tv app for desktop devices" tagline actually sits
+   in boot-logo.png, measured directly off the artwork's pixels (left
+   edge of the text, and its bottom edge) at native 1672x941 -- so the
+   spinner below can be pinned just under it instead of guessed. */
+#define ARKTUBE_SPLASH_TEXT_LEFT_NATIVE 172
+#define ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE 420
+#define ARKTUBE_SPLASH_SPINNER_GAP_NATIVE 28
+#define ARKTUBE_SPLASH_SPINNER_SIZE 30
+
+/* Persisted window state -- currently just "was the window fullscreen
+   last time the app quit", read on startup and written whenever F11 or
+   Escape changes it, so the toggle survives a restart. Native
+   replacement for Neutralino.storage, per docs/PORTING-NOTES.md's
+   "Persisted settings generally" note. */
+#define ARKTUBE_CONFIG_DIR_NAME "arktube_linux"
+#define ARKTUBE_CONFIG_FILE_NAME "config.ini"
+#define ARKTUBE_CONFIG_GROUP "window"
+#define ARKTUBE_CONFIG_KEY_FULLSCREEN "fullscreen"
 
 /* Locate a file this app ships (icons, the injected JS) at runtime.
    Checked in order:
@@ -102,6 +140,67 @@ static gchar *arktube_find_resource(const char *relative) {
     return NULL;
 }
 
+/* Path to the persisted config file, creating its parent directory if
+   needed (g_key_file_save_to_file() does not create directories).
+   Returns a newly allocated path the caller must g_free(). */
+static gchar *arktube_config_path(void) {
+    gchar *dir = g_build_filename(g_get_user_config_dir(), ARKTUBE_CONFIG_DIR_NAME, NULL);
+    g_mkdir_with_parents(dir, 0700);
+
+    gchar *path = g_build_filename(dir, ARKTUBE_CONFIG_FILE_NAME, NULL);
+    g_free(dir);
+    return path;
+}
+
+/* Reads the remembered fullscreen state. Defaults to FALSE (matching
+   the old shell's boot config, "maximize": true / "fullScreen": false)
+   on first run, a missing file, or a corrupt one -- a persisted-setting
+   read failing should fail open to today's existing behavior, not
+   silently force a mode the user never asked for. */
+static gboolean arktube_load_fullscreen_pref(void) {
+    gchar *path = arktube_config_path();
+
+    GKeyFile *keyfile = g_key_file_new();
+    gboolean loaded = g_key_file_load_from_file(keyfile, path, G_KEY_FILE_NONE, NULL);
+
+    gboolean fullscreen = FALSE;
+    if (loaded) {
+        GError *error = NULL;
+        fullscreen = g_key_file_get_boolean(
+            keyfile, ARKTUBE_CONFIG_GROUP, ARKTUBE_CONFIG_KEY_FULLSCREEN, &error);
+        if (error) {
+            fullscreen = FALSE;
+            g_clear_error(&error);
+        }
+    }
+
+    g_key_file_free(keyfile);
+    g_free(path);
+    return fullscreen;
+}
+
+/* Writes the current fullscreen state so the next launch can restore
+   it. Re-reads the existing file first so unrelated keys/groups a
+   future setting might add aren't clobbered by this one save. */
+static void arktube_save_fullscreen_pref(gboolean fullscreen) {
+    gchar *path = arktube_config_path();
+
+    GKeyFile *keyfile = g_key_file_new();
+    g_key_file_load_from_file(keyfile, path, G_KEY_FILE_NONE, NULL);
+    g_key_file_set_boolean(
+        keyfile, ARKTUBE_CONFIG_GROUP, ARKTUBE_CONFIG_KEY_FULLSCREEN, fullscreen);
+
+    GError *error = NULL;
+    if (!g_key_file_save_to_file(keyfile, path, &error)) {
+        g_warning("ARKtube: could not save '%s': %s", path,
+                  error ? error->message : "unknown error");
+        g_clear_error(&error);
+    }
+
+    g_key_file_free(keyfile);
+    g_free(path);
+}
+
 static gboolean arktube_window_is_fullscreen(GtkWidget *window) {
     GdkWindow *gdk_window = gtk_widget_get_window(window);
     if (!gdk_window) {
@@ -124,14 +223,17 @@ static gboolean on_window_key_press(GtkWidget *widget, GdkEventKey *event,
         case GDK_KEY_F11:
             if (arktube_window_is_fullscreen(widget)) {
                 gtk_window_unfullscreen(GTK_WINDOW(widget));
+                arktube_save_fullscreen_pref(FALSE);
             } else {
                 gtk_window_fullscreen(GTK_WINDOW(widget));
+                arktube_save_fullscreen_pref(TRUE);
             }
             return TRUE;
 
         case GDK_KEY_Escape:
             if (arktube_window_is_fullscreen(widget)) {
                 gtk_window_unfullscreen(GTK_WINDOW(widget));
+                arktube_save_fullscreen_pref(FALSE);
                 return TRUE;
             }
             return FALSE;
@@ -175,6 +277,93 @@ static void inject_user_script(WebKitUserContentManager *ucm, const char *path) 
     g_free(contents);
 }
 
+/* Splash shown for ARKTUBE_SPLASH_DURATION_MS on startup: boot-logo.png
+   rendered edge-to-edge (undecorated, centered, no border around it --
+   the artwork itself already frames both the wordmark and the tagline)
+   with a spinning "loading" indicator overlaid just under the tagline,
+   while the main window's WebView loads youtube.com/tv behind it.
+   Returns NULL (and leaves nothing on screen) if the boot logo isn't
+   shipped this run, so packaging without it still boots straight to the
+   main window. */
+static GtkWidget *arktube_create_splash_window(void) {
+    gchar *logo_path = arktube_find_resource("splash screen/boot-logo.png");
+    if (!logo_path) {
+        g_warning("ARKtube: 'splash screen/boot-logo.png' not found; "
+                  "skipping the splash screen this run.");
+        return NULL;
+    }
+
+    GError *error = NULL;
+    GdkPixbuf *logo = gdk_pixbuf_new_from_file_at_scale(
+        logo_path, ARKTUBE_SPLASH_WIDTH, -1, TRUE, &error);
+    g_free(logo_path);
+
+    if (!logo) {
+        g_warning("ARKtube: could not load boot logo: %s",
+                  error ? error->message : "unknown error");
+        g_clear_error(&error);
+        return NULL;
+    }
+
+    GtkWidget *splash = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_decorated(GTK_WINDOW(splash), FALSE);
+    gtk_window_set_resizable(GTK_WINDOW(splash), FALSE);
+    gtk_window_set_position(GTK_WINDOW(splash), GTK_WIN_POS_CENTER);
+    gtk_window_set_skip_taskbar_hint(GTK_WINDOW(splash), TRUE);
+    gtk_window_set_type_hint(GTK_WINDOW(splash), GDK_WINDOW_TYPE_HINT_SPLASHSCREEN);
+
+    /* GtkOverlay so the spinner floats on top of the image at an exact
+       pixel position instead of sharing a box layout with it (which is
+       what pushed the old version's spinner down below the whole image,
+       centered under the character rather than near the text). */
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_container_add(GTK_CONTAINER(splash), overlay);
+
+    GtkWidget *image = gtk_image_new_from_pixbuf(logo);
+    g_object_unref(logo);
+    gtk_container_add(GTK_CONTAINER(overlay), image);
+
+    /* Scale the measured native-image text coordinates down by the same
+       factor the artwork itself was just scaled by, so the spinner
+       tracks the tagline at any ARKTUBE_SPLASH_WIDTH. */
+    gdouble scale = (gdouble)ARKTUBE_SPLASH_WIDTH / (gdouble)ARKTUBE_SPLASH_LOGO_NATIVE_WIDTH;
+    gint margin_start = (gint)(ARKTUBE_SPLASH_TEXT_LEFT_NATIVE * scale);
+    gint margin_top = (gint)(
+        (ARKTUBE_SPLASH_TEXT_BOTTOM_NATIVE + ARKTUBE_SPLASH_SPINNER_GAP_NATIVE) * scale);
+
+    /* The 5s "loading circle": pinned just under the tagline text,
+       left-aligned with it rather than centered under the artwork. */
+    GtkWidget *spinner = gtk_spinner_new();
+    gtk_widget_set_size_request(spinner, ARKTUBE_SPLASH_SPINNER_SIZE,
+                                 ARKTUBE_SPLASH_SPINNER_SIZE);
+    gtk_widget_set_halign(spinner, GTK_ALIGN_START);
+    gtk_widget_set_valign(spinner, GTK_ALIGN_START);
+    gtk_widget_set_margin_start(spinner, margin_start);
+    gtk_widget_set_margin_top(spinner, margin_top);
+    gtk_spinner_start(GTK_SPINNER(spinner));
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), spinner);
+
+    return splash;
+}
+
+typedef struct {
+    GtkWidget *window;
+    GtkWidget *splash;
+} ArktubeSplashData;
+
+/* Fires once, ARKTUBE_SPLASH_DURATION_MS after the splash was shown:
+   tears down the splash and reveals the (already loading) main window. */
+static gboolean on_splash_timeout(gpointer user_data) {
+    ArktubeSplashData *data = (ArktubeSplashData *)user_data;
+
+    gtk_widget_destroy(data->splash);
+    gtk_widget_show_all(data->window);
+    gtk_window_present(GTK_WINDOW(data->window));
+
+    g_free(data);
+    return G_SOURCE_REMOVE;
+}
+
 int main(int argc, char **argv) {
     gtk_init(&argc, &argv);
 
@@ -184,11 +373,19 @@ int main(int argc, char **argv) {
     gtk_window_set_title(GTK_WINDOW(window), ARKTUBE_TITLE);
     gtk_window_set_default_size(GTK_WINDOW(window), ARKTUBE_DEFAULT_WIDTH,
                                  ARKTUBE_DEFAULT_HEIGHT);
-    /* Boots maximized, not fullscreen -- same reasoning as the old
-       shell's neutralino.config.json ("maximize": true, "fullScreen":
-       false): the window manager's chrome stays visible until F11 is
-       pressed explicitly. */
-    gtk_window_maximize(GTK_WINDOW(window));
+    /* Boots maximized by default -- same reasoning as the old shell's
+       neutralino.config.json ("maximize": true, "fullScreen": false):
+       the window manager's chrome stays visible until F11 is pressed
+       explicitly. But if the window was fullscreen when the app last
+       quit, honor that instead, the same way the on-screen fullscreen
+       button's state would have round-tripped through
+       Neutralino.storage in the old shell (see arktube_save_fullscreen_pref
+       in on_window_key_press below). */
+    if (arktube_load_fullscreen_pref()) {
+        gtk_window_fullscreen(GTK_WINDOW(window));
+    } else {
+        gtk_window_maximize(GTK_WINDOW(window));
+    }
 
     gchar *icon_path = arktube_find_resource("icons/appIcon.png");
     if (icon_path) {
@@ -238,8 +435,25 @@ int main(int argc, char **argv) {
     g_signal_connect(window, "key-press-event", G_CALLBACK(on_window_key_press), NULL);
     g_signal_connect(window, "delete-event", G_CALLBACK(on_window_delete), NULL);
 
-    gtk_widget_show_all(window);
+    /* Start loading the TV interface immediately, in the background --
+       the splash screen below covers WebKit's startup + page load, so
+       the main window is only ever shown once (post-splash), instead of
+       flashing an empty webview first. */
     webkit_web_view_load_uri(WEBKIT_WEB_VIEW(webview), ARKTUBE_URL);
+
+    GtkWidget *splash = arktube_create_splash_window();
+    if (splash) {
+        gtk_widget_show_all(splash);
+
+        ArktubeSplashData *splash_data = g_new(ArktubeSplashData, 1);
+        splash_data->window = window;
+        splash_data->splash = splash;
+        g_timeout_add(ARKTUBE_SPLASH_DURATION_MS, on_splash_timeout, splash_data);
+    } else {
+        /* No boot logo shipped this run -- skip straight to the main
+           window rather than blocking startup on a splash that can't show. */
+        gtk_widget_show_all(window);
+    }
 
     gtk_main();
     return EXIT_SUCCESS;
