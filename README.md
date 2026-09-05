@@ -253,9 +253,11 @@ small wrapper that points Neutralino's writable `.tmp` directory at
 `~/Library/Application Support/ARKtube`, since `/Applications` itself
 isn't writable by a normal user.
 
-Every platform artifact above is also built automatically by
-`.github/workflows/stage0.yml` on every push to `main` and is
-downloadable from that workflow run's Artifacts section.
+The `.deb`, the Windows `.exe`, and the macOS `.dmg` are all also built
+automatically by `.github/workflows/stage0.yml` on every push to
+`main` and are downloadable from that workflow run's Artifacts
+section. The AppImage is not currently part of that automated
+pipeline — build it locally with the script above.
 
 ### Controller / remote support
 

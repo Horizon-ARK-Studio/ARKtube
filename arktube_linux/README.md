@@ -39,8 +39,8 @@ which is exactly what this directory is for.
 ## Status
 
 🚧 **Early port, in progress.** This starts from the smallest possible
-slice and grows from there -- see `docs/PORTING-NOTES.md` for exactly
-what has and hasn't been carried over yet from `../ARKtube`.
+slice and grows from there, carrying functionality over from
+`../ARKtube` piece by piece.
 
 Currently working:
 
@@ -49,40 +49,30 @@ Currently working:
       *and* a matching `navigator.userAgent`/`navigator.platform`/
       `navigator.maxTouchPoints`/`screen.*` spoof (`resources/js/user-script.js`)
       -- the UA header alone isn't sufficient; youtube.com/tv's bootstrap
-      JS reads the JS-visible identity directly too. See
-      `docs/PORTING-NOTES.md` for why both layers are needed.
+      JS reads the JS-visible identity directly too.
 * [x] F11 fullscreen toggle, Escape to exit fullscreen
 * [x] Home key navigates back to `/tv`'s root without a full reload
 * [x] Gamepad/remote input, remapped to the same keyboard events
       youtube.com/tv already understands
 * [x] Cursor auto-hide after 10s idle
+* [x] Debian package built and uploaded automatically by
+      `.github/workflows/arktube-linux.yml` (see "Building" below)
 
-Not yet ported (see `docs/PORTING-NOTES.md` for why each needs a
-native replacement rather than a direct copy):
+Not yet ported:
 
 * [ ] Tray icon / tray menu
 * [ ] Immersive Mode (fullscreen lockdown + devtools guard)
 * [ ] Persisted settings
-* [ ] Packaging (AppImage/.deb equivalents, an install target exists
-      in `CMakeLists.txt` but isn't wired into a CI artifact yet)
-
-## Hardware acceleration & stutter
-
-WebKitGTK is asked to keep GPU compositing on unconditionally
-(`WEBKIT_HARDWARE_ACCELERATION_POLICY_ALWAYS`, set in `src/main.c`),
-but smooth playback also depends on the system's GStreamer/VA-API
-stack for video decode. If playback is stuttery, see
-[`docs/HARDWARE-ACCELERATION.md`](docs/HARDWARE-ACCELERATION.md) for
-the GStreamer VA-API packages to install, how to pick the right driver
-for your GPU, and the `WEBKIT_DISABLE_DMABUF_RENDERER` troubleshooting
-step for the rarer case where accelerated compositing itself -- not
-decode -- is the cause.
+* [ ] AppImage packaging (only the `.deb` is currently produced by CI)
 
 ## Building
 
-**CI does the actual compiling** (see `.github/workflows` at the repo
-root, once the workflow for this directory lands) -- everything below
-is for a local dev build.
+**CI does the actual compiling and packaging**
+(`.github/workflows/arktube-linux.yml`, at the repo root) -- it builds
+the binary, installs it into a staging prefix, and packages that
+prefix into a `.deb`, uploading all three as workflow artifacts on
+every push to `main`. It does not currently build an AppImage
+equivalent. Everything below is for a local dev build.
 
 ### Requirements
 
@@ -129,9 +119,6 @@ arktube_linux/
 │   │                       # ../ARKtube/resources/js/app-init.js
 │   └── icons/
 │       └── appIcon.png
-├── packaging/
-│   └── arktube-linux.desktop
-└── docs/
-    ├── PORTING-NOTES.md    # file-by-file mapping from ../ARKtube
-    └── HARDWARE-ACCELERATION.md  # VA-API setup and stutter troubleshooting
+└── packaging/
+    └── arktube-linux.desktop
 ```
