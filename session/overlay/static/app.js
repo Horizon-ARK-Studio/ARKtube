@@ -82,15 +82,35 @@
 
   // ---- panel open/close ---------------------------------------------------
 
-  function openPanel() {
+  // The panel's own CSS sizes itself against the window's actual
+  // height (#panel's max-height: calc(100% - 48px), where 100% is the
+  // body's height -- i.e. the real GTK window size). Previously this
+  // un-hid the panel's CSS *before* awaiting set_panel("overlay")'s
+  // round trip to Python, which is what actually grows the window from
+  // BAR_HEIGHT (56px) to PANEL_HEIGHT (620px) -- so for however long
+  // that resize took, the panel's max-height resolved against the
+  // still-56px-tall window (56 - 48 = 8px) and clipped hard. This is
+  // what the bug report's intro flagged as the BAR_HEIGHT->PANEL_HEIGHT
+  // clip. Fix: await the resize first, then reveal. The extra
+  // requestAnimationFrame after that is defensive, not load-bearing --
+  // resizing the GTK window and WebKit's own view repainting at the
+  // new size are two different points in the event loop even after
+  // Python's call returns, and one rAF reliably lands after that catch
+  // -up. Not verified on real Wayland/GTK hardware from here -- there's
+  // no display in this environment to click-test against -- so this is
+  // the structural fix for the *guaranteed* race the CSS/JS ordering
+  // created, not a claim that timing on real hardware was measured.
+  async function openPanel() {
     if (panelOpen || locked) return;
     panelOpen = true;
-    scrim.classList.remove("hidden");
-    panel.classList.remove("hidden");
-    callApi("set_panel", "overlay");
-    refreshStatus();
-    if (activeTile === "network") refreshNetworkList();
-    requestAnimationFrame(() => tiles[0] && tiles[0].focus());
+    await callApi("set_panel", "overlay");
+    requestAnimationFrame(() => {
+      scrim.classList.remove("hidden");
+      panel.classList.remove("hidden");
+      refreshStatus();
+      if (activeTile === "network") refreshNetworkList();
+      requestAnimationFrame(() => tiles[0] && tiles[0].focus());
+    });
   }
 
   function closePanel() {
