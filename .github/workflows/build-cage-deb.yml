@@ -19,36 +19,32 @@ name: Build ARKtube Cage .deb
 # below detects exactly those from the built binary itself rather than
 # anyone hand-maintaining that list.
 #
-# libdrm's vendored kernel header (include/drm/i915_drm.h) trips a
-# GCC 13 -Wpacked false positive ("packed attribute is unnecessary")
-# on structs that are already naturally packed; libdrm's own
-# meson.build builds with -Werror, turning that warning fatal. This
-# is a known, harmless libdrm/GCC13 interaction (still present as of
-# libdrm 2.4.134), so it's silenced with -Wno-error=packed rather than
-# patching libdrm's vendored header.
-#
-# libdrm's nouveau/nouveau.c trips a second, unrelated GCC13
-# false positive: a memcpy() inside nouveau_object_init() has a
-# length GCC's range analysis can (incorrectly) widen to
-# UINT32_MAX, firing -Werror=array-bounds even though the actual
-# copy is always in-bounds. Same story as the -Wpacked case above
-# (harmless upstream libdrm/GCC13 interaction, still present as of
-# libdrm 2.4.134, fatal only because libdrm builds with -Werror) --
-# silenced the same way, via -Wno-error=array-bounds, rather than
-# patching libdrm's vendored nouveau.c.
-#
-# libdrm's radeon/radeon_surface.c trips a third, again unrelated
-# GCC13 false positive: cik_surface_init() and si_surface_init()
-# each declare a local `stencil_tile_mode` that's only assigned on
-# some (mutually exclusive, always-taken-together) branches before
-# being passed to cik_surface_init_2d()/si_surface_init_2d(), which
-# GCC's flow analysis fails to correlate, firing
-# -Werror=maybe-uninitialized even though the value is always set
-# before use. Same story as the two warnings above (harmless
-# upstream libdrm/GCC13 interaction, fatal only because libdrm
-# builds with -Werror) -- silenced the same way, via
-# -Wno-error=maybe-uninitialized, rather than patching libdrm's
-# vendored radeon_surface.c.
+# libdrm's own meson.build builds itself with -Werror. Its vendored
+# kernel header (include/drm/i915_drm.h) and two of its driver
+# backends independently trip *harmless* GCC 13 false positives that
+# -Werror then turns fatal:
+#   - a -Wpacked warning ("packed attribute is unnecessary") on
+#     structs in i915_drm.h that are already naturally packed;
+#   - a -Warray-bounds warning in nouveau/nouveau.c, where a memcpy()
+#     length GCC's range analysis can (incorrectly) widen to
+#     UINT32_MAX even though the actual copy is always in-bounds;
+#   - a -Wmaybe-uninitialized warning in radeon/radeon_surface.c's
+#     cik_surface_init()/si_surface_init(), where a local
+#     `stencil_tile_mode` is always assigned before use but across a
+#     branch structure GCC's flow analysis can't correlate.
+# All three are confirmed-harmless upstream libdrm/GCC13 interactions
+# (still present as of libdrm 2.4.134), not real bugs, and not code
+# this project maintains or wants to patch line-by-line as GCC finds
+# more of the same. Rather than enumerating each one as -Wno-error=*
+# in c_args (which would apply blindly to every subproject, and would
+# need a new entry each time GCC's analysis flags a fourth spot),
+# -Dlibdrm:werror=false below turns off -Werror for the libdrm
+# subproject specifically -- its own warning_level is untouched, so
+# real problems still show up in the build log, they just can't fail
+# the build. default_library and werror have both been independently
+# overridable per-subproject since Meson 0.54 (this workflow already
+# requires >=1.4.0 below), via -D<name>:option=value on the command
+# line exactly like the default_library overrides already here.
 
 on:
   push:
@@ -97,7 +93,7 @@ jobs:
             -Dpixman:default_library=static \
             -Dlibdisplay-info:default_library=static \
             -Dv4l-utils:default_library=static \
-            -Dc_args="-Wno-error=packed -Wno-error=array-bounds -Wno-error=maybe-uninitialized"
+            -Dlibdrm:werror=false
 
       - name: Build
         run: meson compile -C build
