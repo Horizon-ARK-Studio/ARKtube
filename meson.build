@@ -55,8 +55,22 @@ have_xwayland = wlroots.get_variable(pkgconfig: 'have_xwayland', internal: 'have
 # this tree) is byte-for-byte from swaywm/wlr-protocols@master, the same
 # copy wlroots itself builds against.
 wayland_scanner_dep = dependency('wayland-scanner', native: true)
+# Positional (type-agnostic) form, not `pkgconfig: 'wayland_scanner'`.
+# On a system where wayland-server is new enough to be found via
+# pkg-config, wayland-scanner resolves the same way and either form
+# would work. But when wayland-server is too old (as on Ubuntu Noble,
+# where apt's 1.22.0 doesn't meet wlroots-0.20's own >=1.24.0 floor --
+# see subprojects/wlroots.wrap), meson falls back to building
+# subprojects/wayland from source, which overrides the global
+# wayland-scanner dependency with an *internal* (non-pkgconfig)
+# dependency object. Asking an internal dependency for a pkgconfig
+# variable throws "Could not get an internal variable and no default
+# provided". The positional form auto-detects the dependency's actual
+# type and asks it correctly either way -- this is exactly how
+# wlroots' own meson.build (examples.meson.build) resolves the same
+# wayland-scanner lookup.
 wayland_scanner = find_program(
-  wayland_scanner_dep.get_variable(pkgconfig: 'wayland_scanner'),
+  wayland_scanner_dep.get_variable('wayland_scanner'),
   native: true,
 )
 
