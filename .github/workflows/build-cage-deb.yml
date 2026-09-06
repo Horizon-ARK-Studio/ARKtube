@@ -36,6 +36,19 @@ name: Build ARKtube Cage .deb
 # libdrm 2.4.134, fatal only because libdrm builds with -Werror) --
 # silenced the same way, via -Wno-error=array-bounds, rather than
 # patching libdrm's vendored nouveau.c.
+#
+# libdrm's radeon/radeon_surface.c trips a third, again unrelated
+# GCC13 false positive: cik_surface_init() and si_surface_init()
+# each declare a local `stencil_tile_mode` that's only assigned on
+# some (mutually exclusive, always-taken-together) branches before
+# being passed to cik_surface_init_2d()/si_surface_init_2d(), which
+# GCC's flow analysis fails to correlate, firing
+# -Werror=maybe-uninitialized even though the value is always set
+# before use. Same story as the two warnings above (harmless
+# upstream libdrm/GCC13 interaction, fatal only because libdrm
+# builds with -Werror) -- silenced the same way, via
+# -Wno-error=maybe-uninitialized, rather than patching libdrm's
+# vendored radeon_surface.c.
 
 on:
   push:
@@ -84,7 +97,7 @@ jobs:
             -Dpixman:default_library=static \
             -Dlibdisplay-info:default_library=static \
             -Dv4l-utils:default_library=static \
-            -Dc_args="-Wno-error=packed -Wno-error=array-bounds"
+            -Dc_args="-Wno-error=packed -Wno-error=array-bounds -Wno-error=maybe-uninitialized"
 
       - name: Build
         run: meson compile -C build
