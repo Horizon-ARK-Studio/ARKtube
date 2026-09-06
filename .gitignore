@@ -3,3 +3,4 @@ debug.keystore.b64
 *.patch
 __pycache__/
 *.pyc
+cage-kiosk/
