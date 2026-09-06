@@ -27,15 +27,30 @@ fi
 
 echo "==> Installing Cage's build dependencies"
 # wlroots-0.20 is what this branch's meson.build asks for (see its
-# dependency() call) -- confirm the apt package actually on your distro
-# resolves to that ABI before relying on it; if it doesn't, meson's own
-# fallback ('wlroots' wrap subproject) will build it from source
-# instead, which just takes longer, not a different outcome.
+# dependency() call). Ubuntu Noble's own libwlroots-dev is 0.17 -- too
+# old to satisfy that by pkg-config name alone -- so subprojects/wlroots.wrap
+# (added alongside this script) makes meson build wlroots 0.20 from
+# source automatically the first time `meson setup` runs below, the
+# moment the system package lookup for wlroots-0.20 fails. That first
+# run needs network access on this machine (a one-time clone of
+# wlroots itself); see the wrap file's own comment for details.
+#
+# libwlroots-dev is still installed here even though its own wlroots
+# won't be the one actually used: on Ubuntu/Debian it's a convenient,
+# already-solved way to pull in the *rest* of wlroots's own build
+# dependencies (libinput, libseat, libdrm, EGL/GBM, Vulkan headers,
+# libdisplay-info, libliftoff) transitively, rather than this script
+# maintaining its own separate list of them that would drift from
+# whatever the packaged wlroots actually depends on. A handful of
+# packages wlroots 0.20 needs that 0.17's dependency list doesn't pull
+# in are listed explicitly below it instead.
 sudo apt-get update
 sudo apt-get install -y \
-    meson ninja-build pkg-config \
-    libwlroots-dev libwayland-dev libxkbcommon-dev libdrm-dev \
-    scdoc
+    meson ninja-build pkg-config git scdoc \
+    libwayland-dev libxkbcommon-dev libdrm-dev \
+    libwlroots-dev \
+    libpixman-1-dev wayland-protocols libegl1-mesa-dev liblcms2-dev \
+    hwdata glslang-tools
 
 echo "==> Building Cage (this branch: layer-shell-enabled fork)"
 cd "${REPO_ROOT}"
