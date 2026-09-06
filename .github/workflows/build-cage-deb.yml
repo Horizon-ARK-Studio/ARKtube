@@ -26,6 +26,16 @@ name: Build ARKtube Cage .deb
 # is a known, harmless libdrm/GCC13 interaction (still present as of
 # libdrm 2.4.134), so it's silenced with -Wno-error=packed rather than
 # patching libdrm's vendored header.
+#
+# libdrm's nouveau/nouveau.c trips a second, unrelated GCC13
+# false positive: a memcpy() inside nouveau_object_init() has a
+# length GCC's range analysis can (incorrectly) widen to
+# UINT32_MAX, firing -Werror=array-bounds even though the actual
+# copy is always in-bounds. Same story as the -Wpacked case above
+# (harmless upstream libdrm/GCC13 interaction, still present as of
+# libdrm 2.4.134, fatal only because libdrm builds with -Werror) --
+# silenced the same way, via -Wno-error=array-bounds, rather than
+# patching libdrm's vendored nouveau.c.
 
 on:
   push:
@@ -74,7 +84,7 @@ jobs:
             -Dpixman:default_library=static \
             -Dlibdisplay-info:default_library=static \
             -Dv4l-utils:default_library=static \
-            -Dc_args=-Wno-error=packed
+            -Dc_args="-Wno-error=packed -Wno-error=array-bounds"
 
       - name: Build
         run: meson compile -C build
