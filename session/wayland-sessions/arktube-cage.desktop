@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ARKtube (Cage)
+Comment=Enter the native ARKtube session (Cage kiosk compositor)
+Exec=arktube-cage-session
+TryExec=cage
+Type=Application
+DesktopNames=ARKtube;
+X-GDM-SessionRegisters=false
+X-GDM-CanRunHeadless=true
