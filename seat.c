@@ -259,7 +259,14 @@ handle_virtual_pointer(struct wl_listener *listener, void *data)
 	if (event->suggested_output != NULL) {
 		wlr_pointer->output_name = strdup(event->suggested_output->name);
 	}
-	/* TODO: event->suggested_seat should be checked if we handle multiple seats */
+	/* This compositor only ever creates a single wlr_seat (see cg_server::seat
+	 * in server.h), so there is no second seat to route this to even if a
+	 * client suggests one -- just make sure that's actually what's happening
+	 * rather than silently assuming it, in case that ever changes. */
+	if (event->suggested_seat != NULL && event->suggested_seat != seat->seat) {
+		wlr_log(WLR_INFO, "Virtual pointer suggested seat '%s', but this compositor only has one seat ('%s')",
+			event->suggested_seat->name, seat->seat->name);
+	}
 	handle_new_pointer(seat, wlr_pointer);
 	update_capabilities(seat);
 }
@@ -445,8 +452,14 @@ handle_virtual_keyboard(struct wl_listener *listener, void *data)
 	struct wlr_virtual_keyboard_v1 *keyboard = data;
 	struct wlr_keyboard *wlr_keyboard = &keyboard->keyboard;
 
-	/* TODO: If multiple seats are supported, check keyboard->seat
-	 * to select the appropriate one */
+	/* This compositor only ever creates a single wlr_seat (see cg_server::seat
+	 * in server.h), so there is no second seat to select even if a client
+	 * requests one -- just make sure that's actually what's happening rather
+	 * than silently assuming it, in case that ever changes. */
+	if (keyboard->seat != NULL && keyboard->seat != seat->seat) {
+		wlr_log(WLR_INFO, "Virtual keyboard requested seat '%s', but this compositor only has one seat ('%s')",
+			keyboard->seat->name, seat->seat->name);
+	}
 
 	handle_new_keyboard(seat, wlr_keyboard, true);
 	update_capabilities(seat);
@@ -778,7 +791,12 @@ handle_request_start_drag(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	// TODO: tablet grabs
+	/* No tablet-grab check here: handle_new_input() above never wires
+	 * WLR_INPUT_DEVICE_TABLET/_PAD into this seat (see its "Tablet input is
+	 * not implemented" branch), so no tablet tool can ever hold a grab
+	 * serial for wlr_seat_validate_*_grab_serial() to check against; a
+	 * tablet-initiated start_drag always falls through to here. Revisit this
+	 * once tablet input is actually implemented. */
 	wlr_log(WLR_DEBUG, "Ignoring start_drag request: could not validate pointer/touch serial %" PRIu32,
 		event->serial);
 	wlr_data_source_destroy(event->drag->source);

@@ -1,12 +1,17 @@
 name: Continuous integration build
 on:
   push:
-    branches: [ "master", "v[0-9]+.[0-9]+" ]
+    branches: [ "master", "v[0-9]+.[0-9]+", "arktube-layer-shell" ]
   pull_request:
-    branches: [ "master", "v[0-9]+.[0-9]+" ]
+    branches: [ "master", "v[0-9]+.[0-9]+", "arktube-layer-shell" ]
 
 env:
-  WLROOTS_VERSION: "0.20"
+  # Pinned to the same tag subprojects/wlroots.wrap uses (see the
+  # comment there), not just the "0.20" branch name -- cloning the
+  # branch tip here would silently test a different wlroots commit
+  # than the one the wrap-based fallback build (and build-cage-deb.yml)
+  # actually pins, defeating the point of pinning it at all.
+  WLROOTS_VERSION: "0.20.2"
   ALPINE_PACKAGES: "build-base xcb-util-wm-dev libseat-dev clang git eudev-dev mesa-dev libdrm-dev libinput-dev libxkbcommon-dev pixman-dev wayland-dev meson wayland-protocols xwayland-dev scdoc-doc hwdata libdisplay-info-dev"
   ARCHLINUX_PACKAGES: "xcb-util-wm seatd git clang meson libinput libdrm mesa libxkbcommon wayland wayland-protocols xorg-server-xwayland scdoc libdisplay-info"
 

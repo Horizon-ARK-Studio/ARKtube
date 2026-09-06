@@ -3,3 +3,4 @@
 !/subprojects/*.wrap
 debug.keystore
 debug.keystore.*
+*log

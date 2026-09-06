@@ -51,7 +51,27 @@ on:
     branches: [arktube-layer-shell]
     paths:
       - 'meson.build'
-      - 'src/**'
+      - 'meson_options.txt'
+      # Cage's sources and headers live at the repo root (cage.c,
+      # layer_shell.c, seat.c, output.c, view.c, xdg_shell.c,
+      # xwayland.c, idle_inhibit_v1.c, config.h.in, and their .h
+      # counterparts) -- there is no src/ directory in this tree. The
+      # previous 'src/**' entry never matched anything, so editing any
+      # actual source file silently never triggered a .deb rebuild.
+      - '*.c'
+      - '*.h'
+      - '*.h.in'
+      - 'protocol/**'
+      - 'subprojects/*.wrap'
+      - '.github/workflows/build-cage-deb.yml'
+  pull_request:
+    branches: [arktube-layer-shell]
+    paths:
+      - 'meson.build'
+      - 'meson_options.txt'
+      - '*.c'
+      - '*.h'
+      - '*.h.in'
       - 'protocol/**'
       - 'subprojects/*.wrap'
       - '.github/workflows/build-cage-deb.yml'
