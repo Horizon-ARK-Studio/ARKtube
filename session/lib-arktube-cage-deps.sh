@@ -32,8 +32,21 @@
 # arktube_cage_resolve_meson() below: meson is installed/upgraded via
 # pip --user instead (added to ARKTUBE_CAGE_PIP_PACKAGES), the same
 # mechanism already used for pywebview.
+#
+# bison: Ubuntu Noble's libxkbcommon-dev (1.6.0) is also too old for
+# this branch's wlroots-0.20 (which needs xkbcommon >= 1.8.0), so
+# meson falls back to building subprojects/wlroots's own bundled
+# libxkbcommon from source too -- same reason wayland/libdrm above it
+# get built from source rather than found via pkg-config. That
+# from-source libxkbcommon needs bison as a build-time parser
+# generator (its meson.build calls find_program('bison', 'win_bison'),
+# see https://github.com/xkbcommon/libxkbcommon/blob/master/PACKAGING).
+# It's not something libwlroots-dev's own apt dependencies pull in
+# transitively -- those cover *linked libraries* (libinput, libseat,
+# libdrm, EGL/GBM, Vulkan headers, libdisplay-info, libliftoff), not a
+# code-generation tool a bundled subproject needs only while building.
 ARKTUBE_CAGE_BUILD_DEPS=(
-    ninja-build pkg-config git scdoc
+    ninja-build pkg-config git scdoc bison
     libwayland-dev libxkbcommon-dev libdrm-dev
     libwlroots-dev
     libpixman-1-dev wayland-protocols libegl1-mesa-dev liblcms2-dev
