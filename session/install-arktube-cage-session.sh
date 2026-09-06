@@ -89,11 +89,33 @@ echo "==> Installing Cage's build dependencies"
 sudo apt-get update
 sudo apt-get install -y "${ARKTUBE_CAGE_BUILD_DEPS[@]}"
 
+# apt's meson on Ubuntu Noble is 1.3.2, which is below what
+# subprojects/wlroots/subprojects/libxkbcommon's own meson.build
+# requires (>= 1.4.0) -- see ARKTUBE_CAGE_MIN_MESON_VERSION's comment
+# in lib-arktube-cage-deps.sh for why that's not an apt-fixable
+# problem on this Ubuntu release. Only touch pip's copy if the
+# system's existing meson (wherever it resolves from right now) is
+# actually too old, so this stays a no-op on a machine/release where
+# apt's meson already clears the bar.
+echo "==> Ensuring meson >= ${ARKTUBE_CAGE_MIN_MESON_VERSION} (installing/upgrading via pip --user if needed)"
+CURRENT_MESON_VERSION="0.0.0"
+if command -v meson >/dev/null 2>&1; then
+    CURRENT_MESON_VERSION="$(meson --version)"
+fi
+if arktube_cage_version_ge "${CURRENT_MESON_VERSION}" "${ARKTUBE_CAGE_MIN_MESON_VERSION}"; then
+    echo "    system meson ${CURRENT_MESON_VERSION} already satisfies this -- leaving apt/pip alone."
+else
+    echo "    meson ${CURRENT_MESON_VERSION} is too old (or missing) -- installing a newer one via pip --user."
+    pip install --user --break-system-packages --upgrade "meson>=${ARKTUBE_CAGE_MIN_MESON_VERSION}"
+fi
+
 echo "==> Building Cage (this branch: layer-shell-enabled fork)"
+MESON_BIN="$(arktube_cage_resolve_meson)"
+echo "    using $("${MESON_BIN}" --version) at ${MESON_BIN}"
 cd "${REPO_ROOT}"
-meson setup build --buildtype=release --wipe
-meson compile -C build
-sudo meson install -C build
+"${MESON_BIN}" setup build --buildtype=release --wipe
+"${MESON_BIN}" compile -C build
+sudo "${MESON_BIN}" install -C build
 cd "${HERE}"
 
 # meson's ninja backend writes exactly what got installed to

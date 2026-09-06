@@ -18,17 +18,31 @@
 
 # --- Package lists -----------------------------------------------------
 
-# Only needed to build Cage itself (meson/ninja/the -dev headers, plus
+# Only needed to build Cage itself (ninja/the -dev headers, plus
 # wlroots's own transitive build deps -- see install script's own long
 # comment on libwlroots-dev's role here). Never installed by webtop's
 # script, so no sibling-session check is needed for these.
+#
+# meson is deliberately NOT in this list. Ubuntu Noble's apt package
+# tops out at 1.3.2, and this branch's meson.build pulls in
+# subprojects/wlroots/subprojects/libxkbcommon, whose own meson.build
+# requires >= 1.4.0 -- apt cannot satisfy that on Noble no matter how
+# often it's reinstalled/updated, since there's no newer package in
+# the repo to fall forward to. See ARKTUBE_CAGE_MIN_MESON_VERSION and
+# arktube_cage_resolve_meson() below: meson is installed/upgraded via
+# pip --user instead (added to ARKTUBE_CAGE_PIP_PACKAGES), the same
+# mechanism already used for pywebview.
 ARKTUBE_CAGE_BUILD_DEPS=(
-    meson ninja-build pkg-config git scdoc
+    ninja-build pkg-config git scdoc
     libwayland-dev libxkbcommon-dev libdrm-dev
     libwlroots-dev
     libpixman-1-dev wayland-protocols libegl1-mesa-dev liblcms2-dev
     hwdata glslang-tools
 )
+
+# Floor this branch's subprojects need from meson (see comment above).
+# Bump this if a future subproject bump raises the requirement further.
+ARKTUBE_CAGE_MIN_MESON_VERSION="1.4.0"
 
 # Installed by *both* this script and webtop's install-webtop-session.sh,
 # because both run the same session/overlay/overlay.py. Removing one of
@@ -49,11 +63,14 @@ ARKTUBE_CAGE_LAYERSHELL_ONLY_DEPS=(
     gir1.2-gtklayershell-0.1 libgtk-layer-shell0
 )
 
-# pip packages installed with --user --break-system-packages. Also
-# shared with webtop (same requirements.txt, copied verbatim -- see
-# session/README.md).
+# pip packages installed with --user --break-system-packages.
+# pywebview is shared with webtop (same requirements.txt, copied
+# verbatim -- see session/README.md). meson is this branch's own
+# addition, only here because apt can't meet
+# ARKTUBE_CAGE_MIN_MESON_VERSION on Noble (see comment above it).
 ARKTUBE_CAGE_PIP_PACKAGES=(
     pywebview
+    meson
 )
 
 # --- State locations -----------------------------------------------------
@@ -90,6 +107,61 @@ arktube_cage_webtop_session_installed() {
     [ -f /usr/share/wayland-sessions/arktube.desktop ] ||
         [ -f /usr/share/xsessions/arktube.desktop ] ||
         [ -x "${HOME}/.local/bin/gnome-kiosk-script" ]
+}
+
+# Is dotted version string $1 >= dotted version string $2? Bash has no
+# native version comparison, and `sort -V` needs a subshell/pipeline
+# for what's conceptually a one-line predicate, so do it numerically
+# per-component instead. Missing trailing components compare as 0
+# (e.g. "1.4" >= "1.4.0" is true).
+arktube_cage_version_ge() {
+    local v1="$1" v2="$2"
+    [ "${v1}" = "${v2}" ] && return 0
+    local IFS=.
+    local -a a=(${v1}) b=(${v2})
+    local i n
+    n=${#a[@]}
+    [ ${#b[@]} -gt "$n" ] && n=${#b[@]}
+    for ((i = 0; i < n; i++)); do
+        local ai="${a[i]:-0}" bi="${b[i]:-0}"
+        # strip any non-numeric suffix (e.g. "1.4.0rc1") so the
+        # arithmetic comparison below doesn't choke on it.
+        ai="${ai%%[!0-9]*}"; bi="${bi%%[!0-9]*}"
+        ai="${ai:-0}"; bi="${bi:-0}"
+        if ((10#${ai} > 10#${bi})); then return 0; fi
+        if ((10#${ai} < 10#${bi})); then return 1; fi
+    done
+    return 0
+}
+
+# Which `meson` binary should actually get invoked to build this
+# branch. Prefers a pip --user install if it satisfies
+# ARKTUBE_CAGE_MIN_MESON_VERSION, since apt's on Noble never will (see
+# comment on ARKTUBE_CAGE_MIN_MESON_VERSION above). Falls back to
+# whatever `meson` is on PATH, so this doesn't force a pip install on
+# a system whose apt/distro meson is already new enough. Callers
+# should install-or-upgrade the pip package first (the install
+# script's "Ensure meson" step does this) before relying on this
+# picking the pip one up.
+arktube_cage_resolve_meson() {
+    local user_meson="${HOME}/.local/bin/meson"
+    if [ -x "${user_meson}" ]; then
+        local v
+        v="$("${user_meson}" --version 2>/dev/null || true)"
+        if [ -n "${v}" ] && arktube_cage_version_ge "${v}" "${ARKTUBE_CAGE_MIN_MESON_VERSION}"; then
+            echo "${user_meson}"
+            return 0
+        fi
+    fi
+    if command -v meson >/dev/null 2>&1; then
+        echo "meson"
+        return 0
+    fi
+    # Neither found anywhere sufficient; echo the user path anyway so
+    # the caller's own error message (from trying to run it) is the
+    # one the user sees, rather than this function silently choosing
+    # a name that doesn't exist.
+    echo "${user_meson}"
 }
 
 # --- State file read/write -----------------------------------------------
