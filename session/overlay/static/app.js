@@ -56,6 +56,12 @@
   const volumeIcon = document.getElementById("volume-icon");
   const volumeMuteBtn = document.getElementById("volume-mute");
 
+  const contentPane = document.getElementById("content-pane");
+  const sliderDock = document.querySelector(".slider-dock");
+
+  const lockScreen = document.getElementById("lock-screen");
+  const lockUnlockBtn = document.getElementById("lock-unlock");
+
   // Placeholder copy per tile — see PLACEHOLDER_TILES in overlay.py.
   // Kept in one small table rather than three near-duplicate DOM
   // sections; adding a real backend for one of these later means
@@ -72,11 +78,12 @@
   let lastNetworkType = "ethernet";
   let pendingConnectSsid = null;
   let debounceTimers = {};
+  let locked = false;
 
   // ---- panel open/close ---------------------------------------------------
 
   function openPanel() {
-    if (panelOpen) return;
+    if (panelOpen || locked) return;
     panelOpen = true;
     scrim.classList.remove("hidden");
     panel.classList.remove("hidden");
@@ -164,10 +171,41 @@
     }
   });
 
+  // Reverse of ArrowDown above. Previously there was no scripted way
+  // back up to the tile row from the content pane or the slider dock
+  // (see the bug report, item 4) -- a remote/controller user who
+  // pressed Down had only Escape (closes the whole panel) to get back,
+  // since app-init.js's gamepad poller never emits Tab. This restores
+  // Up as the mirror of Down: from anywhere inside the content pane or
+  // the always-visible slider dock, it returns focus to the
+  // currently-active tile, one level, not the whole panel.
+  panel.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowUp") return;
+    const active = document.activeElement;
+    const withinContentOrSliders =
+      (contentPane && contentPane.contains(active)) ||
+      (sliderDock && sliderDock.contains(active));
+    if (!withinContentOrSliders) return;
+    e.preventDefault();
+    const activeTileEl = tiles.find((t) => t.dataset.tile === activeTile);
+    if (activeTileEl) activeTileEl.focus();
+  });
+
   // ---- power menu -----------------------------------------------------------
 
   powerToggle.addEventListener("click", () => {
     powerMenu.classList.toggle("hidden");
+  });
+
+  // Previously only Lock/Log Out/Restart/Power Off or the whole panel's
+  // own Escape handler closed this -- clicking a tile or a slider while
+  // it was open just left it floating over the content pane (bug
+  // report item 6). Mirrors #scrim's existing click-to-close for the
+  // panel itself.
+  document.addEventListener("click", (e) => {
+    if (powerMenu.classList.contains("hidden")) return;
+    if (powerMenu.contains(e.target) || powerToggle.contains(e.target)) return;
+    powerMenu.classList.add("hidden");
   });
   document.getElementById("power-lock").addEventListener("click", () => {
     callApi("lock");
@@ -342,6 +380,10 @@
     applyBattery(status.battery, status.is_laptop);
   }
 
+  // ---- lock screen ------------------------------------------------------------
+
+  lockUnlockBtn.addEventListener("click", () => callApi("unlock"));
+
   // ---- pywebview bridge --------------------------------------------------------
 
   function callApi(method, ...args) {
@@ -350,6 +392,38 @@
     }
     return window.pywebview.api[method](...args).catch(() => null);
   }
+
+  // ---- hooks called from overlay.py (SystemAPI.lock/unlock, the
+  // Immersive Mode visibility watcher) --------------------------------------
+  //
+  // Both are plain window-global functions, not pywebview.api methods,
+  // because these are pushes from Python into JS (window.evaluate_js),
+  // the opposite direction from callApi() above. Guarded with
+  // `window.__cgX && ...` on the Python side, so it's safe for these to
+  // simply not exist yet on an older overlay.py -- see overlay.py's own
+  // lock()/unlock()/start_visibility_watcher().
+
+  window.__cgSetLocked = function (isLocked) {
+    locked = !!isLocked;
+    if (locked) {
+      powerMenu.classList.add("hidden");
+      if (panelOpen) closePanel();
+      lockScreen.classList.remove("hidden");
+      requestAnimationFrame(() => lockUnlockBtn.focus());
+    } else {
+      lockScreen.classList.add("hidden");
+      launcher.focus();
+    }
+  };
+
+  window.__cgSetImmersiveHidden = function (hidden) {
+    // Mirrors the overlay.py watcher's own "force the panel closed
+    // before hiding" behavior (start_visibility_watcher()) so the
+    // launcher can never end up hidden-but-still-expanded the next
+    // time Immersive Mode drops -- see the bug report, item 5.
+    if (hidden && panelOpen) closePanel();
+    launcher.classList.toggle("hidden", !!hidden);
+  };
 
   function init() {
     setActiveTile("network");

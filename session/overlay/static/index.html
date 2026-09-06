@@ -136,6 +136,22 @@
 
   </div>
 
+  <!-- Lock screen: full-viewport pane shown while SystemAPI.locked is
+       true. Separate from #panel/#scrim -- lock() anchors the window's
+       own layer surface to all four edges (see overlay.py), so this
+       needs to cover the whole output, not just sit inside the
+       top-right panel strip. No PIN/credential check, by design (see
+       overlay.py's lock() docstring) -- Unlock is a single remote
+       "select" away. -->
+  <div id="lock-screen" class="hidden" role="dialog" aria-label="Session locked" aria-modal="true">
+    <div class="lock-content">
+      <span class="lock-icon" data-icon="lock"></span>
+      <div class="lock-title">Locked</div>
+      <div class="lock-sub">ARKtube is paused. Select Unlock to continue.</div>
+      <button id="lock-unlock" class="ghost-btn primary lock-unlock-btn" type="button">Unlock</button>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

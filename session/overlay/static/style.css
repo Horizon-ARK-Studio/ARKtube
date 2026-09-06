@@ -85,6 +85,9 @@ html, body {
 [data-icon="bluetooth"] {
   --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2 8 6l3 3-3 3 4 4v4l4-4-3.5-3.5L16 9l-4-4V2Zm0 5 1.5 1.5L12 10V7Zm0 7 1.5 1.5L12 17v-3Z'/%3E%3C/svg%3E");
 }
+[data-icon="lock"] {
+  --svg: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a4 4 0 0 0-4 4v3H7a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V10a1 1 0 0 0-1-1h-1V6a4 4 0 0 0-4-4Zm-2 7V6a2 2 0 1 1 4 0v3h-4Z'/%3E%3C/svg%3E");
+}
 
 [data-icon]::before { content: ""; }
 [data-icon] { -webkit-mask-image: var(--svg); mask-image: var(--svg); }
@@ -446,3 +449,43 @@ html, body {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Lock screen ----------------------------------------------------------
+ * Full-viewport, above everything else here (#scrim/#panel are closed
+ * before this shows -- see app.js __cgSetLocked()). Covers the whole
+ * output because the window itself is anchored to all four edges while
+ * locked, not just the top-right panel strip. */
+
+#lock-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 7, 10, 0.92);
+  backdrop-filter: blur(4px);
+}
+
+.lock-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  padding: 0 32px;
+}
+
+.lock-icon { width: 56px; height: 56px; color: var(--text-faint); }
+.lock-title { font-size: 30px; font-weight: 800; color: var(--text); }
+.lock-sub { font-size: 15px; color: var(--text-dim); max-width: 420px; }
+
+.lock-unlock-btn {
+  margin-top: 10px;
+  padding: 12px 32px;
+  font-size: 16px;
+  background: var(--bg-tile);
+  border-radius: var(--radius-md);
+}
+.lock-unlock-btn:hover { background: var(--bg-tile-active); }
+.lock-unlock-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
