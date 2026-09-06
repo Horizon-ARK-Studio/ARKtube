@@ -413,15 +413,20 @@
     return window.pywebview.api[method](...args).catch(() => null);
   }
 
-  // ---- hooks called from overlay.py (SystemAPI.lock/unlock, the
-  // Immersive Mode visibility watcher) --------------------------------------
+  // ---- hook called from overlay.py (SystemAPI.lock/unlock) ------------------
   //
-  // Both are plain window-global functions, not pywebview.api methods,
-  // because these are pushes from Python into JS (window.evaluate_js),
-  // the opposite direction from callApi() above. Guarded with
-  // `window.__cgX && ...` on the Python side, so it's safe for these to
+  // A plain window-global function, not a pywebview.api method, because
+  // this is a push from Python into JS (window.evaluate_js), the
+  // opposite direction from callApi() above. Guarded with
+  // `window.__cgX && ...` on the Python side, so it's safe for this to
   // simply not exist yet on an older overlay.py -- see overlay.py's own
-  // lock()/unlock()/start_visibility_watcher().
+  // lock()/unlock().
+  //
+  // There is no __cgSetImmersiveHidden hook any more, and no
+  // Immersive-Mode-driven auto-hide behind it -- see overlay.py's
+  // module-level comment (above PLACEHOLDER_TILES) for why. The
+  // launcher has no "hidden" class applied anywhere at load, so it's
+  // simply always shown by default; nothing here needs to toggle it.
 
   window.__cgSetLocked = function (isLocked) {
     locked = !!isLocked;
@@ -434,15 +439,6 @@
       lockScreen.classList.add("hidden");
       launcher.focus();
     }
-  };
-
-  window.__cgSetImmersiveHidden = function (hidden) {
-    // Mirrors the overlay.py watcher's own "force the panel closed
-    // before hiding" behavior (start_visibility_watcher()) so the
-    // launcher can never end up hidden-but-still-expanded the next
-    // time Immersive Mode drops -- see the bug report, item 5.
-    if (hidden && panelOpen) closePanel();
-    launcher.classList.toggle("hidden", !!hidden);
   };
 
   function init() {

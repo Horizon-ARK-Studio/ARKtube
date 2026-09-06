@@ -48,8 +48,6 @@ each one an actual backend.
 
 import os
 import subprocess
-import threading
-import time
 from pathlib import Path
 
 import webview
@@ -74,19 +72,29 @@ PANEL_HEIGHT = 620
 # Tiles that exist in the UI this stage, but have no real backend yet.
 PLACEHOLDER_TILES = {"bluetooth", "sound", "picture"}
 
-STATUS_POLL_SECONDS = 2
-
-# main's own source of truth for Immersive Mode -- see
-# docs/STAGE-7-VISIBILITY-AND-CURSOR.md, which this restores the
-# behavior of (Stage 8 dropped it; see docs/STAGE-8-TV-STYLE-OVERLAY.md
-# "What's explicitly deferred" and the bug report that flagged it as a
-# real regression, not just an unbuilt placeholder).
-IMMERSIVE_MODE_FILE = (
-    Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
-    / "ARKtube"
-    / ".storage"
-    / "immersiveMode.neustorage"
-)
+# Immersive-Mode-gated auto-hide (Stage 7, restored by Stage 8) is
+# intentionally *not* here. That mechanism hid the launcher affordance
+# while `main` was both in "Immersive Mode" and fully connected, by
+# reading a flag `main` was expected to persist to
+# `immersiveMode.neustorage` (a Neutralino.storage artifact). Current
+# `main` (`arktube_linux`, a GTK3 + WebKit2GTK rewrite -- see its own
+# README's "Not yet ported" list) never writes that file: it has no
+# Neutralino dependency left and Immersive Mode itself was never
+# ported. Reading a file that's never written meant
+# `_immersive_mode_enabled()` always returned False, which always
+# satisfied the auto-hide's "not in Immersive Mode" branch -- so in
+# practice the launcher simply never auto-hid, silently, with no error.
+#
+# Rather than resurrect a signal `main` doesn't produce, this overlay
+# no longer waits on one at all: this window is a real
+# wlr-layer-shell-v1 surface pinned above ARKtube's own surface (see
+# attach_layer_shell() below), not an in-page element that needs the
+# app's cooperation to be seen or interacted with. An overlay, by
+# construction, overlays -- ARKtube never has to "exit" anything for
+# the launcher to be visible or clickable, so there's nothing for a
+# same-session app to signal in the first place. The launcher is just
+# always shown; see SystemAPI.__init__ and main() below, which no
+# longer start a visibility-watcher thread.
 
 
 def run(cmd, timeout=3):
@@ -194,7 +202,6 @@ class SystemAPI:
         self.window = None
         self.width = 1920  # overwritten in main() from the real screen
         self.locked = False
-        self._stop_watcher = threading.Event()
 
     # ---- panel state ------------------------------------------------------
 
@@ -558,46 +565,10 @@ class SystemAPI:
     def reboot(self):
         run(["systemctl", "reboot"])
 
-    # ---- immersive-mode auto-hide -------------------------------------------
-    # Restores the behavior docs/STAGE-7-VISIBILITY-AND-CURSOR.md built
-    # and docs/STAGE-8-TV-STYLE-OVERLAY.md's rewrite dropped (flagged
-    # there under "What's explicitly deferred," but still a real
-    # regression versus Stage 6/7 -- see the bug report's item 5).
-
-    def _immersive_mode_enabled(self):
-        try:
-            return IMMERSIVE_MODE_FILE.read_text().strip() == "1"
-        except OSError:
-            return False
-
-    def start_visibility_watcher(self):
-        def watch():
-            last_should_show = None
-            while not self._stop_watcher.is_set():
-                if not self.locked:
-                    should_show = (not self._immersive_mode_enabled()) or (
-                        not self._connectivity_full()
-                    )
-                    if should_show != last_should_show:
-                        last_should_show = should_show
-                        if self.window is not None:
-                            self.window.evaluate_js(
-                                "window.__cgSetImmersiveHidden && "
-                                f"window.__cgSetImmersiveHidden({str(not should_show).lower()})"
-                            )
-                            if not should_show:
-                                # Force the panel closed before hiding,
-                                # so it can't be stuck open-but-invisible
-                                # the next time Immersive Mode drops --
-                                # matches Stage 7's own topbar.py
-                                # behavior.
-                                self.set_panel("none")
-                time.sleep(STATUS_POLL_SECONDS)
-
-        threading.Thread(target=watch, daemon=True).start()
-
-    def stop_visibility_watcher(self):
-        self._stop_watcher.set()
+    # No immersive-mode auto-hide, and no visibility-watcher thread --
+    # see the module-level comment above PLACEHOLDER_TILES for why. The
+    # launcher is always shown; nothing in SystemAPI needs to poll for
+    # or toggle that.
 
 
 def _screen_width(default=1920):
@@ -638,7 +609,6 @@ def main():
         keyboard_mode=GtkLayerShell.KeyboardMode.ON_DEMAND,
     )
     api.window = window
-    window.events.shown += lambda: api.start_visibility_watcher()
     webview.start(gui="gtk")
 
 
