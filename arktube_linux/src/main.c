@@ -34,6 +34,13 @@
     depended on Neutralino.os.setTray and need a native replacement
     (AppIndicator or similar), tracked as follow-up work.
 
+    Connectivity is also monitored for the app's whole lifetime, not
+    just at boot: the background thread started in main() keeps polling
+    after its first successful check instead of exiting, so no_internet.png
+    (see arktube_sync_no_internet_overlay()) can reappear over an
+    already-loaded page if the connection drops mid-session, the same
+    way it already covered a genuinely offline boot.
+
     Persisted settings (the other Neutralino.storage-dependent piece
     PORTING-NOTES.md flagged) are ported for the one setting that
     currently needs it: whether the window was fullscreen last run, so
@@ -160,6 +167,17 @@
 #define ARKTUBE_CONNECTIVITY_PORT 53
 #define ARKTUBE_CONNECTIVITY_TIMEOUT_MS 2000
 #define ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS 3000
+
+/* Once a check has succeeded, arktube_connectivity_thread() below no
+   longer exits -- it keeps polling for the rest of the app's life so a
+   connection that drops mid-session (not just at boot) is still caught
+   -- but there's no reason to hammer connect(2) every
+   ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS while things are fine. This
+   separate, longer interval is used for that steady-state "are we still
+   online" polling; the shorter retry interval above is kept for the
+   already-offline case, where recovering quickly matters more than
+   saving a few wakeups. */
+#define ARKTUBE_CONNECTIVITY_MONITOR_INTERVAL_MS 5000
 
 /* Persisted window state -- currently just "was the window fullscreen
    last time the app quit", read on startup and written whenever F11 or
@@ -852,27 +870,69 @@ static void on_webview_load_changed(WebKitWebView *webview, WebKitLoadEvent load
    connectivity check below, so a genuinely offline machine shows
    no_internet.png -- never an empty or perpetually-loading browser --
    and only starts the real load (WebView + boot splash, exactly the
-   existing flow) once arktube_check_internet_now() actually succeeds. */
+   existing flow) once arktube_check_internet_now() actually succeeds.
+
+   That check doesn't stop once the boot-time gate passes, though:
+   arktube_connectivity_thread() keeps polling for as long as the app
+   runs, and is_online below is the flag it flips on every transition --
+   the single piece of state arktube_sync_no_internet_overlay() reads to
+   decide whether no_internet.png belongs on screen. That makes a
+   connection dropping mid-session (the WebView already loaded, the user
+   mid-video) show exactly the same no-internet screen boot-time offline
+   already did, instead of that screen only ever being reachable before
+   the first successful load. */
 typedef struct {
     GtkWidget          *root_overlay;
     GtkWidget          *webview;
     ArktubeSplashState *splash_state;
     GtkWidget          *no_internet_overlay; /* main-thread-only; NULL when not shown */
     gboolean            webview_started;     /* main-thread-only; guards a single load_uri() */
+    gboolean            is_online;           /* main-thread-only; TRUE once any check -- boot-time
+                                                 or later -- has succeeded, FALSE from the moment
+                                                 any check (including a post-boot one) fails. This
+                                                 is the flag arktube_sync_no_internet_overlay() acts
+                                                 on; the two idle callbacks below do nothing but set
+                                                 it and call that function. */
 } ArktubeConnectivityState;
 
-/* Main-thread idle callback: starts the real app, the same WebView
-   load + boot splash the app always showed before this offline gating
-   existed. Tearing down a no-internet overlay first if the connection
-   only came back after one was already shown. Idempotent via
-   webview_started, in case this somehow ran more than once. */
+/* The one place that actually shows or hides no_internet.png, driven
+   purely off cs->is_online. Called after every flag change (both
+   directions) so it's equally at home clearing the overlay a moment
+   after boot as it is bringing it back mid-session: idempotent either
+   way, since it only acts when the overlay's current on/off state
+   disagrees with the flag. */
+static void arktube_sync_no_internet_overlay(ArktubeConnectivityState *cs) {
+    if (cs->is_online) {
+        if (cs->no_internet_overlay) {
+            gtk_widget_destroy(cs->no_internet_overlay);
+            cs->no_internet_overlay = NULL;
+        }
+        return;
+    }
+
+    if (!cs->no_internet_overlay) {
+        GtkWidget *overlay = arktube_create_no_internet_overlay();
+        if (overlay) {
+            gtk_overlay_add_overlay(GTK_OVERLAY(cs->root_overlay), overlay);
+            gtk_widget_show_all(overlay);
+            cs->no_internet_overlay = overlay;
+        }
+    }
+}
+
+/* Main-thread idle callback: flips the flag, then (for the very first
+   success only) starts the real app -- the same WebView load + boot
+   splash the app always showed before this offline gating existed. A
+   later success, after the WebView is already up and a mid-session
+   no_internet.png was showing over it, just clears that overlay via
+   arktube_sync_no_internet_overlay() and leaves the still-loaded page
+   underneath alone -- there's no reason to reload it just because the
+   connection blipped. */
 static gboolean arktube_on_internet_ready(gpointer user_data) {
     ArktubeConnectivityState *cs = (ArktubeConnectivityState *)user_data;
 
-    if (cs->no_internet_overlay) {
-        gtk_widget_destroy(cs->no_internet_overlay);
-        cs->no_internet_overlay = NULL;
-    }
+    cs->is_online = TRUE;
+    arktube_sync_no_internet_overlay(cs);
 
     if (!cs->webview_started) {
         cs->webview_started = TRUE;
@@ -891,43 +951,48 @@ static gboolean arktube_on_internet_ready(gpointer user_data) {
     return G_SOURCE_REMOVE;
 }
 
-/* Main-thread idle callback: shows the no-internet screen the first
-   time a check fails. Guarded so repeated failures during the retry
-   loop don't pile up duplicate overlays on top of each other. */
+/* Main-thread idle callback: flips the flag the other way and lets
+   arktube_sync_no_internet_overlay() show the screen -- unconditionally
+   now, not just before the first successful load, so a connection that
+   disappears after boot (mid-video, mid-browse) is caught exactly the
+   same way a genuinely offline boot always was. */
 static gboolean arktube_on_internet_unavailable(gpointer user_data) {
     ArktubeConnectivityState *cs = (ArktubeConnectivityState *)user_data;
 
-    if (!cs->no_internet_overlay && !cs->webview_started) {
-        GtkWidget *overlay = arktube_create_no_internet_overlay();
-        if (overlay) {
-            gtk_overlay_add_overlay(GTK_OVERLAY(cs->root_overlay), overlay);
-            gtk_widget_show_all(overlay);
-            cs->no_internet_overlay = overlay;
-        }
-    }
+    cs->is_online = FALSE;
+    arktube_sync_no_internet_overlay(cs);
 
     return G_SOURCE_REMOVE;
 }
 
-/* Runs entirely off the main thread: repeats arktube_check_internet_now()
-   (itself bounded by ARKTUBE_CONNECTIVITY_TIMEOUT_MS) with an
-   ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS sleep between failed attempts,
-   until one succeeds -- then hands off to the main thread via
-   g_idle_add() and exits. Nothing in this function touches GTK directly;
-   only the two callbacks above do, and only ever on the main thread,
-   which is what makes it safe for this to run concurrently with the
-   GTK main loop at all. */
+/* Runs entirely off the main thread for as long as the app does now --
+   it used to return (ending the thread) the moment one
+   arktube_check_internet_now() call succeeded, which is exactly why a
+   connection loss later in the session was never noticed. Now a
+   success only switches this to the longer, steady-state
+   ARKTUBE_CONNECTIVITY_MONITOR_INTERVAL_MS polling pace instead of
+   exiting, so is_online keeps getting re-checked (and
+   arktube_on_internet_unavailable can still fire) indefinitely; a
+   failure -- whether that's the original boot-time case or a later
+   drop -- goes back to the faster ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS
+   pace so reconnecting is noticed quickly either way. Nothing in this
+   function touches GTK directly; only the two callbacks above do, and
+   only ever on the main thread, which is what makes it safe for this to
+   run concurrently with the GTK main loop at all. */
 static gpointer arktube_connectivity_thread(gpointer user_data) {
     ArktubeConnectivityState *cs = (ArktubeConnectivityState *)user_data;
 
     for (;;) {
         if (arktube_check_internet_now()) {
             g_idle_add(arktube_on_internet_ready, cs);
-            return NULL;
+            g_usleep(ARKTUBE_CONNECTIVITY_MONITOR_INTERVAL_MS * 1000);
+        } else {
+            g_idle_add(arktube_on_internet_unavailable, cs);
+            g_usleep(ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS * 1000);
         }
-        g_idle_add(arktube_on_internet_unavailable, cs);
-        g_usleep(ARKTUBE_CONNECTIVITY_RETRY_INTERVAL_MS * 1000);
     }
+
+    return NULL; /* unreachable: the loop above never breaks */
 }
 
 int main(int argc, char **argv) {
