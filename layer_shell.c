@@ -157,6 +157,22 @@ handle_layer_surface_destroy(struct wl_listener *listener, void *data)
 	free(layer_surface);
 }
 
+static void handle_output_destroy(struct wl_listener *listener, void *data);
+
+static void
+watch_output_destroy(struct cg_layer_surface *layer_surface, struct wlr_output *output)
+{
+	/* Guard against double-registration: if we're ever called twice for
+	 * the same layer_surface (shouldn't happen given initial_commit only
+	 * fires once, but this keeps the invariant explicit rather than
+	 * assumed), drop the old listener before adding a new one. */
+	if (layer_surface->output_destroy.notify) {
+		wl_list_remove(&layer_surface->output_destroy.link);
+	}
+	layer_surface->output_destroy.notify = handle_output_destroy;
+	wl_signal_add(&output->events.destroy, &layer_surface->output_destroy);
+}
+
 static void
 handle_layer_surface_commit(struct wl_listener *listener, void *data)
 {
@@ -173,6 +189,16 @@ handle_layer_surface_commit(struct wl_listener *listener, void *data)
 				struct cg_output *output =
 					wl_container_of(layer_surface->server->outputs.next, output, link);
 				layer_surface->layer_surface->output = output->wlr_output;
+				/* Must watch for this output's destruction here too,
+				 * not just in handle_new_layer_shell_surface(): that
+				 * function only registers the listener when the
+				 * client supplies an output up front. A layer surface
+				 * that omitted one (as most do) would otherwise have
+				 * no destroy listener at all, so if this output later
+				 * disappears, this surface's ->output field is left
+				 * dangling -- a use-after-free the next time it's
+				 * dereferenced (e.g. in arrange_one()). */
+				watch_output_destroy(layer_surface, output->wlr_output);
 			} else {
 				wlr_log(WLR_ERROR, "New layer surface but no output is available; closing it");
 				wlr_layer_surface_v1_destroy(layer_surface->layer_surface);
@@ -251,8 +277,7 @@ handle_new_layer_shell_surface(struct wl_listener *listener, void *data)
 	wl_signal_add(&wlr_layer_surface->events.new_popup, &layer_surface->new_popup);
 
 	if (wlr_layer_surface->output) {
-		layer_surface->output_destroy.notify = handle_output_destroy;
-		wl_signal_add(&wlr_layer_surface->output->events.destroy, &layer_surface->output_destroy);
+		watch_output_destroy(layer_surface, wlr_layer_surface->output);
 	} else {
 		layer_surface->output_destroy.notify = NULL;
 	}
