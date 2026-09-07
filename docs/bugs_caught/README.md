@@ -65,7 +65,9 @@ earlier next time.
 | Bug | Environment | One-line summary |
 |---|---|---|
 | [`idle-inhibit-gap.md`](idle-inhibit-gap.md) | Not hardware-specific | SYSTEM_DESIGN.md's idle-inhibit success criterion was unimplemented, and even implemented would have missed logind's separate `IdleAction`; fixed by extending the existing `systemd-inhibit` wrapper to `--what=handle-power-key:idle`. |
-| [`swaybar-top-layer-fullscreen.md`](swaybar-top-layer-fullscreen.md) | wlr-layer-shell-v1, protocol-level | Closed an open item defensively with `bar { mode invisible }`, after research suggested (but couldn't confirm on real hardware) that fullscreen-vs-top-layer stacking already prevented the feared overlap. |
+| [`swaybar-top-layer-fullscreen.md`](swaybar-top-layer-fullscreen.md) | wlr-layer-shell-v1, protocol-level | Closed an open item defensively, after research suggested (but couldn't confirm on real hardware) that fullscreen-vs-top-layer stacking already prevented the feared overlap. Superseded by `bar-block-vs-bar-mode-command.md`'s fix to *how* it was closed. |
+| [`bar-block-vs-bar-mode-command.md`](bar-block-vs-bar-mode-command.md) | Sway config semantics | The previous entry's own `bar { mode invisible }` fix was wrong: a `bar {}` block declares a *new* bar rather than editing the existing one, so it silenced nothing. Replaced with the i3-compat `bar mode invisible` command, which actually retargets existing bars. |
+| [`xdg-current-desktop-not-imported.md`](xdg-current-desktop-not-imported.md) | Not hardware-specific | SYSTEM_DESIGN.md's own quoted sample imports `XDG_CURRENT_DESKTOP`; the shipped `10-systemd.conf` didn't. Fixed by adding it to the `import-environment` call. |
 
 ## Non-goals
 
