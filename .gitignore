@@ -1,6 +1,1 @@
 *.patch
-/subprojects/
-!/subprojects/*.wrap
-debug.keystore
-debug.keystore.*
-*log

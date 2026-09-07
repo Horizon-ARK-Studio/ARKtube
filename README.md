@@ -1,61 +1,182 @@
-# Cage: a Wayland kiosk
+# ARKtube Webtop — Sway Edition
 
-<img src="https://www.hjdskes.nl/img/projects/cage/cage.svg" alt="Cage's logo" width="150px" align="right">
+## One app. One screen. Nothing else.
 
-This is Cage, a Wayland kiosk. A kiosk runs a single, maximized
-application.
+Webtop is the layer that turns a login into ARKtube.
 
-This README is only relevant for development resources and instructions. For a
-description of Cage and installation instructions for end-users, please see
-[its project page](https://www.hjdskes.nl/projects/cage) and [the
-Wiki](https://github.com/cage-kiosk/cage/wiki/).
-See [the man page](./cage.1.scd) for a list of possible environment variables and run options.
+This edition builds that layer on **Sway** — a Wayland compositor,
+chosen for one reason: it does almost nothing on its own, and that's
+exactly what a kiosk needs.
 
-## Release signatures
+---
 
-Releases up to version 0.1.4 are signed with [6EBC43B1](http://keys.gnupg.net/pks/lookup?op=vindex&fingerprint=on&search=0x37C445296EBC43B1). Releases from 0.1.5 onwards are signed with
-[E88F5E48](https://keys.openpgp.org/search?q=34FF9526CFEF0E97A340E2E40FDE7BE0E88F5E48)
-All releases are published on [GitHub](https://github.com/cage-kiosk/cage/releases).
+## Why Sway
 
-## Building and running Cage
+Sway is a tiling Wayland compositor built on `wlroots`. It has no
+shell, no panel, no dock, and no desktop metaphor to switch off.
 
-You can build Cage with the [meson](https://mesonbuild.com/) build system. It
-requires wayland, wlroots, and xkbcommon to be installed. Optionally, install
-scdoc for manual pages. Cage is currently based on branch 0.20 of wlroots.
+For a normal desktop, that's a limitation.
 
-Simply execute the following steps to build Cage:
+For ARKtube, it's the point.
 
-```
-$ meson setup build
-$ meson compile -C build
+```text
+GNOME Shell   → a desktop, with a kiosk mode bolted on
+GNOME Kiosk   → a stripped desktop compositor
+Sway          → a compositor, with nothing to strip
 ```
 
-By default, this builds a debug build. To build a release build, use `meson
-setup build --buildtype=release`.
+There's less to disable, because there was less there to begin with.
 
-Cage comes with compile-time support for XWayland. To enable this, make sure
-that your version of wlroots is compiled with this option. Note that you'll
-need to have the XWayland binary installed on your system for this to work.
+---
 
-You can run Cage by running `./build/cage APPLICATION`. If you run it from
-within an existing X11 or Wayland session, it will open in a virtual output as
-a window in your existing session. If you run it at a TTY, it'll run with the
-KMS+DRM backend. In debug mode (default build type with Meson), press
-<kbd>Alt</kbd>+<kbd>Esc</kbd> to quit. For more configuration options, see
-[Configuration](https://github.com/cage-kiosk/cage/wiki/Configuration).
+## What this edition does
 
-Cage is based on the annotated source of tinywl and rootston.
+* replaces the session compositor with **Sway**
+* launches ARKtube as the only window Sway ever shows
+* forces that window fullscreen, borderless, and gapless — on every
+  output
+* disables the workspace, tiling, and window-switching behavior
+  ARKtube never needs
+* keeps lock, logout, and power handled by the session — not faked
+  in JavaScript
+* returns cleanly to the login screen on exit, every time
 
-## Bugs
+Everything else about Webtop's contract stays the same. Only the
+compositor underneath it changes.
 
-For any bug, please [create an
-issue](https://github.com/cage-kiosk/cage/issues/new) on
-[GitHub](https://github.com/cage-kiosk/cage).
+---
 
-## License
+## The session, end to end
 
-Please see
-[LICENSE](https://github.com/cage-kiosk/cage/blob/master/LICENSE) on
-[GitHub](https://github.com/cage-kiosk/cage).
+```text
+Login screen
+     │
+     ▼
+   Sway starts, headless of any UI
+     │
+     ▼
+   ARKtube launches as the sole window
+     │
+     ▼
+   fullscreen global · no border · no gaps
+     │
+     ├── Lock   → session lock, ARKtube stays put
+     ├── Logout → Sway exits, ARKtube exits with it
+     └── Power  → handled by the session, not the app
+     │
+     ▼
+Login screen
+```
 
-Copyright © 2018-2020 Jente Hidskes <dev@hjdskes.nl>
+No panel ever draws. No workspace ever gets a chance to switch.
+
+---
+
+## Configuration
+
+Sway's entire kiosk posture lives in one config file.
+
+```text
+# /etc/sway/config.d/arktube.conf
+
+# ARKtube is the only thing this session runs
+exec arktube
+
+# it owns the whole output, always
+for_window [app_id="arktube"] fullscreen global
+
+# no chrome, no seams
+default_border none
+gaps inner 0
+gaps outer 0
+
+# nothing to tile, nothing to switch
+bindsym $mod+Shift+q kill
+```
+
+Everything not needed for ARKtube is left out — not disabled, just
+never written.
+
+---
+
+## Session integration
+
+Sway doesn't ship a systemd unit of its own, so the session defines
+one:
+
+```text
+~/.config/systemd/user/sway-session.target
+~/.config/systemd/user/sway-session.service
+```
+
+Sway signals its own readiness at the end of its config:
+
+```text
+exec systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+exec systemctl --user start sway-session.target
+```
+
+That target is what the rest of the session — locking, power,
+network — binds to. When it stops, the session is over.
+
+---
+
+## What this is not
+
+* not a general-purpose Sway setup
+* not a tiling window manager, in practice — there is only ever one
+  window
+* not a place for a bar, a launcher, or a status line
+* not a replacement for Ubuntu, GDM, or the login screen
+
+Sway is infrastructure here. It is not meant to be seen.
+
+---
+
+## Requirements
+
+* `sway`, built with `wlroots`
+* a `seatd`-managed seat, or `elogind`/`systemd-logind`
+* Sway's optional companions — `swaylock`, `swayidle` — for lock and
+  idle behavior, if the session doesn't handle these itself
+
+Nothing else. No `waybar`, no `wofi`, no terminal, no launcher.
+
+---
+
+## Status
+
+🚧 **Compositor swap, in progress.**
+
+* [x] Sway launches ARKtube as the sole window
+* [x] Fullscreen, borderless, gapless across all outputs
+* [x] Session target wired to lock / logout / power
+* [ ] `seatd` vs. `logind` decided as the default seat backend
+* [ ] Idle and lock behavior finalized against `docs/STAGE-8`
+
+---
+
+## Philosophy
+
+Sway doesn't add a desktop.
+
+It adds a window, and gets out of the way.
+
+```text
+              ┌──────────────┐
+              │   ARKtube    │
+              └──────┬───────┘
+                     │
+               the only window
+                     │
+              ┌──────▼───────┐
+              │     Sway     │
+              └──────┬───────┘
+                     │
+               nothing else
+```
+
+If a feature isn't required to show ARKtube, full-screen, on one
+screen — it doesn't belong in this config.
+
+That's the whole edition.
