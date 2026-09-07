@@ -167,15 +167,25 @@ project's own methodology elsewhere prefers, rather than guess:
     `sway -d`'s own key-event logging) shows what keysym, if any, the
     key actually sends.
 
+Fixed by this run, but still worth confirming against a real display:
+
+  * Whether Ubuntu's default swaybar shows through over ARKtube's
+    fullscreen window — 20-arktube.conf now sets `bar { mode invisible }`
+    defensively; see docs/bugs_caught/swaybar-top-layer-fullscreen.md
+    for why this was closed without a real-display confirmation.
+  * Idle-inhibit during playback (docs/foundational/SYSTEM_DESIGN.md) —
+    this was documented as a success criterion but nothing actually
+    requested an inhibitor anywhere in this branch. The
+    `systemd-inhibit` wrapper 20-arktube.conf already execs overlay.py
+    through now also takes logind's own `idle` inhibitor for the
+    session's lifetime, not just `handle-power-key`; see
+    docs/bugs_caught/idle-inhibit-gap.md. This is session-wide, not
+    playback-scoped — ARKtube has no playback-state signal to key a
+    narrower inhibitor off of yet.
+
 Not yet resolved by this script, and worth checking against a real
 display before calling this done:
 
-  * Whether Ubuntu's default swaybar shows through over ARKtube's
-    fullscreen window — see the note at the bottom of
-    src/session/sway/config.d/20-arktube.conf.
-  * Idle-inhibit during playback (docs/foundational/SYSTEM_DESIGN.md) —
-    that's application-level, on ARKtube's or the overlay's side, not
-    something this session layer can add on their behalf.
   * Any TV-remote key that isn't a bare arrow/Enter/Escape/Home/F11 —
     Sway's default config only binds $mod-modified keys out of the box,
     which shouldn't collide with ARKtube's bare-key set (see

@@ -643,15 +643,23 @@ class SystemAPI:
           `gnome-session-quit --logout --no-prompt` as the correct
           primitive, and this bypassed it.
 
-        Post-cutover, the second problem no longer applies: cage is the
-        whole session (there is no separate gnome-session layer to
-        bypass), and cage's own sigchld handling means it exits the
-        moment its direct child process exits -- see cage.c's
-        sigchld_handler() and session/cage/arktube-cage-session, which
-        is that direct child. So `loginctl terminate-session` against
-        *our own* session is now genuinely the right primitive, not a
-        bypass of a better one, because there is no better one in this
-        architecture.
+        Post-cutover (this branch runs under Sway, not the earlier cage
+        fork -- see docs/foundational/SYSTEM_DESIGN.md), the second
+        problem no longer applies in a different way than it briefly
+        did under cage: `loginctl terminate-session` against systemd-
+        logind kills every process in the session's scope, Sway
+        included, regardless of which process happens to ask for it.
+        There is no separate gnome-session layer for this call to
+        bypass, so it's the right primitive here, not a shortcut past
+        a better one. (An earlier version of this comment described
+        this in terms of the removed cage fork's own sigchld_handler()
+        exiting when its direct child exited -- that file no longer
+        exists in this branch and was never accurate for Sway, which
+        does not shape its exit behavior around a single tracked child
+        the way cage did. Sway's own session-readiness signaling, and
+        what stops `sway-session.target` on exit, is
+        src/session/sway/config.d/10-systemd.conf, not anything in
+        this file.)
 
         The first problem is fixed properly here: prefer
         $XDG_SESSION_ID, which systemd-logind's pam_systemd already
@@ -660,11 +668,12 @@ class SystemAPI:
         working); fall back to the `show-session self` query only if
         that's unset; and if *both* are unavailable, fall back to
         closing our own window rather than ever calling
-        terminate-session/terminate-user with an empty argument -- with
-        no other windows/output left, cage's own "no views left, and
-        the primary was the one that mattered" exit path
-        (view_destroy() in the cage fork) ends the session anyway, just
-        one step later than a direct terminate-session call would.
+        terminate-session/terminate-user with an empty argument --
+        with no other windows/output left and this being Sway's one
+        client, Sway itself exits and 10-systemd.conf's own shutdown
+        subscription stops sway-session.target, ending the session
+        anyway, just one step later than a direct terminate-session
+        call would.
         """
         session_id = os.environ.get("XDG_SESSION_ID") or run(
             ["loginctl", "show-session", "self", "-p", "Id", "--value"]

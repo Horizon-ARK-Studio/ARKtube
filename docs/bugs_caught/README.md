@@ -3,10 +3,12 @@
 A running log of bugs found in this branch's compositor layer, and
 what actually fixed them.
 
-This directory is currently empty of individual entries. That's
-accurate, not an oversight — log a bug here the first time this
-branch actually catches one, using the template below, rather than
-backfilling history that wasn't written down at the time.
+This directory previously had no individual entries. Two are logged
+below, both found by a full sweeping scan of this branch's compositor
+layer for the class of bug where behavior is silently controlled by
+something other than what a reader would assume — a different systemd
+mechanism, a different layer-shell layer, a doc describing intent
+rather than implementation.
 
 ## When something belongs here
 
@@ -62,7 +64,8 @@ earlier next time.
 
 | Bug | Environment | One-line summary |
 |---|---|---|
-| _none logged yet_ | | |
+| [`idle-inhibit-gap.md`](idle-inhibit-gap.md) | Not hardware-specific | SYSTEM_DESIGN.md's idle-inhibit success criterion was unimplemented, and even implemented would have missed logind's separate `IdleAction`; fixed by extending the existing `systemd-inhibit` wrapper to `--what=handle-power-key:idle`. |
+| [`swaybar-top-layer-fullscreen.md`](swaybar-top-layer-fullscreen.md) | wlr-layer-shell-v1, protocol-level | Closed an open item defensively with `bar { mode invisible }`, after research suggested (but couldn't confirm on real hardware) that fullscreen-vs-top-layer stacking already prevented the feared overlap. |
 
 ## Non-goals
 
