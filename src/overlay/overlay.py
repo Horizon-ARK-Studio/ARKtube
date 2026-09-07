@@ -46,20 +46,12 @@ placeholder — see PLACEHOLDER_TILES below — until a later stage gives
 each one an actual backend.
 """
 
-import os
 import logging
+import os
 import signal
 import subprocess
 import sys
 from pathlib import Path
-
-import webview
-
-import gi
-
-gi.require_version("Gtk", "3.0")
-gi.require_version("GtkLayerShell", "0.1")
-from gi.repository import GLib, Gtk, GtkLayerShell  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -72,18 +64,121 @@ STATIC = HERE / "static"
 # also goes to a real file, and the top-level `try/except` in `__main__`
 # below guarantees a traceback is written even for exceptions no other
 # handler in this file catches.
+#
+# THIS MUST RUN BEFORE ANY OTHER IMPORT. `webview`, `gi`,
+# `gi.require_version(...)`, and `from gi.repository import ...` are all
+# import-time calls that can raise (missing wheel, missing typelib, wrong
+# GIR version on the system, etc.), and Python's default unhandled-exception
+# behavior is to print a traceback to stderr and exit -- which, per the
+# comment above, goes nowhere visible in a kiosk session. If logging is
+# configured after those imports, the single most likely crash (a missing
+# gir1.2-gtklayershell-0.1 / libgtk-layer-shell0) never reaches the log file
+# at all. Configuring logging first, then wrapping each risky import in its
+# own try/except below, closes that gap: every failure mode gets a specific,
+# logged diagnostic instead of a silent process death.
 # ---------------------------------------------------------------------------
 LOG_PATH = HERE / "overlay.log"
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler(sys.stderr),
-    ],
-)
+try:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_PATH),
+            logging.StreamHandler(sys.stderr),
+        ],
+    )
+except OSError:
+    # LOG_PATH's directory doesn't exist / isn't writable (e.g. the
+    # overlay's install dir got created without write perms, or $HOME
+    # isn't what we expect under whatever launches this unit). Fall back
+    # to stderr-only logging rather than dying before a single line is
+    # emitted -- Sway swallows stderr in the normal case, but this still
+    # means `python3 overlay.py` run by hand from a terminal, or a
+    # unit with output redirected, shows *something*.
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(sys.stderr)],
+    )
+
 log = logging.getLogger("overlay")
+log.info("overlay.py: logging configured (log file: %s)", LOG_PATH)
+
+# ---------------------------------------------------------------------------
+# Risky imports, guarded individually. Each of these previously ran at
+# module import time, before logging existed, so any failure among them
+# -- an ImportError from a missing `python3-webview`/`pywebview` package,
+# an ImportError from `gi` (`python3-gi` not installed), or a ValueError
+# from `gi.require_version(...)` when the requested typelib isn't
+# resolvable via GIR (e.g. `gir1.2-gtklayershell-0.1` / the
+# `libgtk-layer-shell0` .so it wraps isn't actually present) -- surfaced as
+# a bare traceback to an unseen stderr and nothing else. Each import here
+# gets its own try/except so the log always says *which* dependency was
+# missing, not just that startup failed.
+# ---------------------------------------------------------------------------
+try:
+    import webview
+except ImportError:
+    log.exception(
+        "overlay.py: failed to import 'webview' -- is the pywebview "
+        "package (python3-webview / pip 'pywebview') installed for this "
+        "interpreter (%s)?",
+        sys.executable,
+    )
+    raise
+
+try:
+    import gi
+except ImportError:
+    log.exception(
+        "overlay.py: failed to import 'gi' (PyGObject) -- is python3-gi "
+        "installed for this interpreter (%s)?",
+        sys.executable,
+    )
+    raise
+
+try:
+    gi.require_version("Gtk", "3.0")
+except ValueError:
+    log.exception(
+        "overlay.py: gi.require_version('Gtk', '3.0') failed -- GTK3's "
+        "GIR typelib is not resolvable. Check that gir1.2-gtk-3.0 (or "
+        "your distro's equivalent) is installed and on the GIR search "
+        "path."
+    )
+    raise
+
+try:
+    gi.require_version("GtkLayerShell", "0.1")
+except ValueError:
+    log.exception(
+        "overlay.py: gi.require_version('GtkLayerShell', '0.1') failed -- "
+        "this is the single most likely startup crash. It means the "
+        "GtkLayerShell-0.1 GIR typelib is not resolvable, which almost "
+        "always means gir1.2-gtklayershell-0.1 and/or the "
+        "libgtk-layer-shell0 shared library it wraps are missing on this "
+        "system, or GI_TYPELIB_PATH doesn't include the directory that "
+        "provides GtkLayerShell-0.1.typelib. Without this, the corner "
+        "menu/power panel/network tile/OSD have no process behind them "
+        "at all -- volume/brightness still work because those bypass "
+        "overlay.py entirely via direct Sway bindsyms."
+    )
+    raise
+
+try:
+    from gi.repository import GLib, Gtk, GtkLayerShell  # noqa: E402
+except ImportError:
+    log.exception(
+        "overlay.py: 'from gi.repository import GLib, Gtk, GtkLayerShell' "
+        "failed even though gi.require_version() succeeded for both -- "
+        "likely a partially-broken GI installation (typelib present but "
+        "its backing .so failed to load; check `ldd` on "
+        "libgtk-layer-shell0's .so for missing linked libraries)."
+    )
+    raise
+
+log.info("overlay.py: all imports succeeded, continuing startup")
 
 # Window sizes for each panel state. Prior to the remote-input-mapping
 # work (docs/planning/REMOTE-INPUT-MAPPING.md) there were only two:
@@ -212,6 +307,29 @@ def _init_layer_shell(gtk_window, config):
     gtk-layer-shell's init_for_window() is a one-time role transition,
     not something safe to call again later.
     """
+    # Extra guardrail: gtk-layer-shell ships an `is_supported()` check
+    # that queries whether the *running compositor* actually advertises
+    # the wlr-layer-shell-v1 protocol, independent of whether the
+    # library/typelib itself loaded. The library and typelib loading
+    # fine (which is all the import-time guards above can check) does
+    # not guarantee the compositor side is there -- e.g. this same
+    # binary running under a compositor without wlr-layer-shell support.
+    # log, don't raise: init_for_window() itself is still the real
+    # authority, this just gets a specific reason into the log instead
+    # of a bare exception if it does fail below.
+    try:
+        supported = GtkLayerShell.is_supported()
+    except Exception:  # noqa: BLE001 - this check itself must not crash startup
+        supported = None
+    if supported is False:
+        log.warning(
+            "GtkLayerShell.is_supported() returned False -- the running "
+            "Wayland compositor does not advertise wlr-layer-shell-v1. "
+            "init_for_window() below will likely fail; if it does, the "
+            "window falls back to unmanaged placement (the Stage 8 bug "
+            "this file exists to fix)."
+        )
+
     GtkLayerShell.init_for_window(gtk_window)
     _update_layer_shell(gtk_window, config)
 
