@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+#
+# install.sh — makes ARKtube selectable from Ubuntu/GDM's gear icon,
+# running under Sway instead of GNOME Kiosk. See docs/foundational/
+# PROBLEM_STATEMENT.md for why Sway, and docs/foundational/SYSTEM_DESIGN.md
+# for what each layer below is responsible for.
+#
+# Deliberately everything here is a packaged binary + a dropped-in file:
+# no compositor forked or compiled (that's exactly what this branch
+# stopped doing — see PROBLEM_STATEMENT.md's "What was tried" section),
+# and no wrapper script between GDM and sway either — GDM's Exec=sway is
+# the same binary the `sway` package's own session entry already uses.
+# ARKtube's behavior lives entirely in the /etc/sway/config.d/ fragments
+# this script installs, not in a custom launcher.
+#
+# Requires: ARKtube already built/installed from `main` (so
+# `arktube_linux` is on PATH — see main's arktube_linux/CMakeLists.txt).
+# This script does not build or install ARKtube itself; see the root
+# README's "What this is not" section for why that boundary matters.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SESSION="${HERE}/src/session"
+OVERLAY="${HERE}/src/overlay"
+
+if ! command -v arktube_linux >/dev/null 2>&1; then
+    echo "warning: 'arktube_linux' is not on PATH yet." >&2
+    echo "         Build and install ARKtube from main first, then re-run this script." >&2
+fi
+
+echo "==> Installing Sway and the overlay's runtime dependencies"
+sudo apt-get update
+sudo apt-get install -y \
+    sway \
+    python3-pip python3-gi gir1.2-webkit2-4.1 gir1.2-gtklayershell-0.1 \
+    network-manager wireplumber pulseaudio-utils brightnessctl upower
+# No seatd here: Ubuntu ships systemd-logind, and Sway uses logind as its
+# seat backend automatically when one is present — seatd is only needed
+# on non-systemd or non-logind setups, neither of which is Ubuntu/GDM.
+# This resolves the root README's "seatd vs. logind" open item, for this
+# distro at least.
+
+echo "==> Adding a gear-menu entry named ARKtube"
+sudo install -Dm644 "${SESSION}/wayland-sessions/arktube.desktop" \
+    /usr/share/wayland-sessions/arktube.desktop
+# The `sway` package ships its own /usr/share/wayland-sessions/sway.desktop
+# (Name=Sway) alongside this one, same sibling-file approach webtop used
+# for gnome-kiosk-script-session rather than editing a package-owned
+# conffile. One real difference from webtop's version of this step: both
+# entries launch the exact same `sway` binary with the exact same
+# /etc/sway/config.d/*, so picking "Sway" from the gear menu boots into
+# ARKtube fullscreen too, not a blank desktop. On a machine dedicated to
+# this appliance that's arguably correct; if a genuine plain-Sway session
+# is ever needed alongside this one, that needs a second Sway config
+# path and a wrapper script pointing at it — deliberately not built here
+# since nothing has asked for it yet.
+
+echo "==> Installing ARKtube's Sway config"
+sudo install -Dm644 "${SESSION}/sway/config.d/10-systemd.conf" \
+    /etc/sway/config.d/10-systemd.conf
+sudo install -Dm644 "${SESSION}/sway/config.d/20-arktube.conf" \
+    /etc/sway/config.d/20-arktube.conf
+
+# Ubuntu's stock /etc/sway/config already includes config.d/* by
+# convention, but that's verified here rather than assumed — same
+# "checked directly" approach this project has used at every prior
+# stage — since a missing include line would mean everything just
+# installed above silently never runs.
+if [ -f /etc/sway/config ] && grep -qE '^\s*include\s+/etc/sway/config\.d/\*' /etc/sway/config; then
+    echo "    /etc/sway/config already includes config.d/* — nothing to add"
+else
+    echo "    /etc/sway/config does not include config.d/* — appending it"
+    echo 'include /etc/sway/config.d/*' | sudo tee -a /etc/sway/config >/dev/null
+fi
+
+echo "==> Installing the sway-session.target unit"
+mkdir -p "${HOME}/.config/systemd/user"
+install -Dm644 "${SESSION}/systemd/user/sway-session.target" \
+    "${HOME}/.config/systemd/user/sway-session.target"
+systemctl --user daemon-reload 2>/dev/null || true
+
+echo "==> Deploying the system overlay"
+mkdir -p "${HOME}/.local/share/arktube-overlay/static"
+install -Dm755 "${OVERLAY}/overlay.py" "${HOME}/.local/share/arktube-overlay/overlay.py"
+install -Dm644 "${OVERLAY}/static/index.html" "${HOME}/.local/share/arktube-overlay/static/index.html"
+install -Dm644 "${OVERLAY}/static/style.css" "${HOME}/.local/share/arktube-overlay/static/style.css"
+install -Dm644 "${OVERLAY}/static/app.js" "${HOME}/.local/share/arktube-overlay/static/app.js"
+pip install --user --break-system-packages -r "${OVERLAY}/requirements.txt"
+
+cat <<'EOF'
+
+==> Done.
+
+Log out, click the gear icon on the GDM login screen, and select
+"ARKtube". Authenticating from there should land in ARKtube fullscreen
+with no manual steps.
+
+Login/authentication, the gear menu itself, and returning to it on
+logout are all handled by GDM — nothing above touches any of that; see
+the root README's "Responsibilities" section for why that boundary is
+deliberate.
+
+Lock and logout are already wired and need no extra work here: overlay.py's
+lock()/unlock()/logout() call loginctl and $XDG_SESSION_ID directly, which
+are systemd/logind primitives, not GNOME-Kiosk-specific — that's why this
+branch could salvage overlay.py byte-for-byte from webtop in the first
+place. There is still no PIN/credential check behind Lock — see overlay.py's
+own lock() docstring for why that's intentional, not an oversight.
+
+Not yet resolved by this script, and worth checking against a real
+display before calling this done:
+
+  * Whether Ubuntu's default swaybar shows through over ARKtube's
+    fullscreen window — see the note at the bottom of
+    src/session/sway/config.d/20-arktube.conf.
+  * Idle-inhibit during playback (docs/foundational/SYSTEM_DESIGN.md) —
+    that's application-level, on ARKtube's or the overlay's side, not
+    something this session layer can add on their behalf.
+  * Any TV-remote key that isn't a bare arrow/Enter/Escape/Home/F11 —
+    Sway's default config only binds $mod-modified keys out of the box,
+    which shouldn't collide with ARKtube's bare-key set (see
+    docs/foundational/PROBLEM_STATEMENT.md's sibling doc on `webtop` for
+    how that was checked for GNOME Kiosk's default bindings); this has
+    not been re-checked against Sway's own default config the same way.
+EOF

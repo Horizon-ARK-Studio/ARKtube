@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ARKtube
+Comment=Enter the native ARKtube session (Sway)
+Exec=sway
+TryExec=sway
+Type=Application
+DesktopNames=sway
+X-GDM-SessionRegisters=false
+X-GDM-CanRunHeadless=true

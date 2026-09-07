@@ -151,8 +151,14 @@ Nothing else. No `waybar`, no `wofi`, no terminal, no launcher.
 * [x] Sway launches ARKtube as the sole window
 * [x] Fullscreen, borderless, gapless across all outputs
 * [x] Session target wired to lock / logout / power
-* [ ] `seatd` vs. `logind` decided as the default seat backend
+* [x] `seatd` vs. `logind` decided — `logind`, since Ubuntu ships it and
+      Sway uses it as its seat backend automatically; no `seatd` needed
+* [x] Selectable from GDM's gear icon — see `install.sh` and
+      `src/session/`
 * [ ] Idle and lock behavior finalized against `docs/STAGE-8`
+* [ ] Confirm the default swaybar doesn't show through over ARKtube's
+      fullscreen window — see the note in
+      `src/session/sway/config.d/20-arktube.conf`
 
 ---
 
