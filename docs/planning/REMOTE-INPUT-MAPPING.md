@@ -192,10 +192,15 @@ All of the following still need to be checked against real hardware
 — consistent with this project's own standard of confirming against
 the actual installed/actual device rather than assuming:
 
-- [ ] Keysym the Fire TV remote's Menu (☰) button actually emits
-      (narrowed to X11 keycode 147 by research; keysym name at that
-      keycode not yet confirmed — both `Menu` and `XF86Menu` are
-      bound defensively in the meantime)
+- [x] Keysym at X11 keycode 147 confirmed to be `Menu` — the other
+      candidate, `XF86Menu`, turned out not to be a real keysym at all
+      (absent from libxkbcommon's own keysymdef; the actual `sway -C`
+      parse error it caused was the "There is an error in your config
+      file" bar reported against a real install) and has been removed
+      rather than corrected to a real XF86 name, since `Menu` alone
+      was already sufficient. `$mod+s` was added as a second, always-
+      available path to the same signal that doesn't depend on the
+      remote's Menu button or a `Menu`-key-equipped keyboard at all.
 - [ ] Whether the specific remote/dongle being paired delivers
       Power/Volume/Mute to this box as Bluetooth HID at all, or only
       drives the TV via IR/HDMI-CEC (confirmed to vary by remote
