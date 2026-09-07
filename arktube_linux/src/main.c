@@ -427,6 +427,74 @@ static void arktube_remap_remote_keyval(GdkEventKey *event) {
     }
 }
 
+/* System settings overlay -- stage 1 skeleton only (see the chat that
+   led here: this replaces the separate overlay.py + wlr-layer-shell-v1
+   process the arktube-layer-shell branch used under Sway, which fought
+   a real class of Sway/wlroots bugs around fullscreen-global surfaces
+   vs. the overlay layer -- pointer events not reaching an overlay-layer
+   surface while this app is "fullscreen global", and rendering damage
+   glitches from direct scan-out interacting with a second layer-shell
+   client. Folding the panel into this same process and GtkOverlay
+   sidesteps both: it's ordinary GTK widget stacking inside one window,
+   not a second compositor surface racing this one for a layer.
+
+   Deliberately no small always-on corner "pill" affordance this stage
+   -- just the panel itself, empty for now, toggled fully open/closed.
+   Network/volume/brightness/power controls (the actual point of the
+   overlay) are follow-up work; this stage only proves out placement
+   and the toggle. */
+#define ARKTUBE_SETTINGS_PANEL_HEIGHT 260
+
+static void arktube_toggle_settings_panel(GtkWidget *panel) {
+    if (gtk_widget_get_visible(panel)) {
+        gtk_widget_hide(panel);
+    } else {
+        gtk_widget_show(panel);
+    }
+}
+
+/* Full-width panel anchored to the top of the window (matching the
+   overlay.py branch's own "overlay" panel state -- TOP anchor, full
+   screen width) but as a plain GtkOverlay child: GTK_ALIGN_FILL
+   horizontally, GTK_ALIGN_START vertically, height-limited by
+   gtk_widget_set_size_request() rather than a layer-shell anchor/margin
+   pair. Hidden by default (gtk_widget_set_no_show_all() so the later
+   gtk_widget_show_all(window) in main() can't force it open) --
+   arktube_toggle_settings_panel() above is the only thing that ever
+   shows it. */
+static GtkWidget *arktube_create_settings_panel(void) {
+    GtkWidget *panel = gtk_event_box_new();
+    gtk_widget_set_name(panel, "arktube-settings-panel");
+    gtk_widget_set_size_request(panel, -1, ARKTUBE_SETTINGS_PANEL_HEIGHT);
+    gtk_widget_set_hexpand(panel, TRUE);
+    gtk_widget_set_halign(panel, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(panel, GTK_ALIGN_START);
+
+    GtkCssProvider *css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(
+        css,
+        "#arktube-settings-panel { background-color: rgba(15, 15, 15, 0.92); }"
+        "#arktube-settings-panel label { color: #ffffff; font-size: 20px; }",
+        -1, NULL);
+    gtk_style_context_add_provider(
+        gtk_widget_get_style_context(panel),
+        GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+
+    /* Placeholder content only -- real tiles (Network/Volume/Brightness/
+       Power, per the overlay.py branch's PANEL_GEOMETRY/PLACEHOLDER_TILES)
+       land in a follow-up pass. */
+    GtkWidget *label = gtk_label_new("ARKtube Settings (placeholder)");
+    gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
+    gtk_container_add(GTK_CONTAINER(panel), label);
+
+    gtk_widget_set_no_show_all(panel, TRUE);
+    gtk_widget_hide(panel);
+
+    return panel;
+}
+
 /* F11 toggles fullscreen; Escape only ever backs out of it, mirroring
    the old app-init.js onKeyDown()/exitFullScreenIfActive() -- Escape
    never quits the app outright. Connected on the GtkWindow itself
@@ -435,11 +503,30 @@ static void arktube_remap_remote_keyval(GdkEventKey *event) {
    or its local-shell-page fallback did. */
 static gboolean on_window_key_press(GtkWidget *widget, GdkEventKey *event,
                                      gpointer user_data) {
-    (void)user_data;
+    GtkWidget *settings_panel = GTK_WIDGET(user_data);
 
     arktube_remap_remote_keyval(event);
 
     switch (event->keyval) {
+        /* Remote's Menu (☰) button, and $mod+s from any attached
+           keyboard as a fallback -- see 20-arktube.conf's own Menu/
+           $mod+s comment on the arktube-layer-shell branch for how
+           these keysyms were confirmed against real remote hardware.
+           No Sway bindsym or SIGUSR1 signal needed any more: this app
+           now owns the panel directly, so it just handles the keypress
+           itself, ahead of youtube.com/tv's own keydown handling, the
+           same way F11/Escape already do below. */
+        case GDK_KEY_Menu:
+            arktube_toggle_settings_panel(settings_panel);
+            return TRUE;
+
+        case GDK_KEY_s:
+            if (event->state & GDK_SUPER_MASK) {
+                arktube_toggle_settings_panel(settings_panel);
+                return TRUE;
+            }
+            return FALSE;
+
         case GDK_KEY_F11:
             if (arktube_window_is_fullscreen(widget)) {
                 gtk_window_unfullscreen(GTK_WINDOW(widget));
@@ -1099,7 +1186,16 @@ int main(int argc, char **argv) {
     gtk_container_add(GTK_CONTAINER(window), root_overlay);
     gtk_container_add(GTK_CONTAINER(root_overlay), webview);
 
-    g_signal_connect(window, "key-press-event", G_CALLBACK(on_window_key_press), NULL);
+    /* Added directly to root_overlay, same as the splash/no-internet
+       overlays below -- ordinary GtkOverlay stacking inside this one
+       window, not a second top-level surface. Created (and hidden) up
+       front, unconditionally, rather than lazily on first Menu press,
+       so the very first keypress can toggle it with no first-use
+       delay. */
+    GtkWidget *settings_panel = arktube_create_settings_panel();
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), settings_panel);
+
+    g_signal_connect(window, "key-press-event", G_CALLBACK(on_window_key_press), settings_panel);
     g_signal_connect(window, "delete-event", G_CALLBACK(on_window_delete), NULL);
 
     /* Connected before load_uri() below so "load-changed" can't possibly
