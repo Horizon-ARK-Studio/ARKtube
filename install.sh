@@ -107,6 +107,13 @@ branch could salvage overlay.py byte-for-byte from webtop in the first
 place. There is still no PIN/credential check behind Lock — see overlay.py's
 own lock() docstring for why that's intentional, not an oversight.
 
+Remote input (Menu/Power/Volume/cursor auto-hide) is now wired per
+docs/planning/REMOTE-INPUT-MAPPING.md — see that doc's own "Open
+verification items" for what's still unconfirmed against real
+hardware (chiefly: the Menu button's exact keysym, and whether the
+specific remote/dongle being paired delivers Power/Volume/Mute to
+this box as Bluetooth HID at all, versus only to the TV via IR/CEC).
+
 Not yet resolved by this script, and worth checking against a real
 display before calling this done:
 
@@ -122,4 +129,7 @@ display before calling this done:
     docs/foundational/PROBLEM_STATEMENT.md's sibling doc on `webtop` for
     how that was checked for GNOME Kiosk's default bindings); this has
     not been re-checked against Sway's own default config the same way.
+
+Run uninstall.sh (same directory as this script) to remove everything
+install.sh sets up, if this ever needs to come back off a machine.
 EOF

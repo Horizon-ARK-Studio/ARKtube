@@ -62,6 +62,14 @@
   const lockScreen = document.getElementById("lock-screen");
   const lockUnlockBtn = document.getElementById("lock-unlock");
 
+  const powerPanel = document.getElementById("power-panel");
+  const powerPanelButtons = Array.from(powerPanel.querySelectorAll(".power-panel-btn"));
+
+  const osd = document.getElementById("osd");
+  const osdIcon = document.getElementById("osd-icon");
+  const osdValue = document.getElementById("osd-value");
+  const osdFill = document.getElementById("osd-fill");
+
   // Placeholder copy per tile — see PLACEHOLDER_TILES in overlay.py.
   // Kept in one small table rather than three near-duplicate DOM
   // sections; adding a real backend for one of these later means
@@ -81,48 +89,85 @@
   let locked = false;
 
   // ---- panel open/close ---------------------------------------------------
-
-  // The panel's own CSS sizes itself against the window's actual
-  // height (#panel's max-height: calc(100% - 48px), where 100% is the
-  // body's height -- i.e. the real GTK window size). Previously this
-  // un-hid the panel's CSS *before* awaiting set_panel("overlay")'s
-  // round trip to Python, which is what actually grows the window from
-  // BAR_HEIGHT (56px) to PANEL_HEIGHT (620px) -- so for however long
-  // that resize took, the panel's max-height resolved against the
-  // still-56px-tall window (56 - 48 = 8px) and clipped hard. This is
-  // what the bug report's intro flagged as the BAR_HEIGHT->PANEL_HEIGHT
-  // clip. Fix: await the resize first, then reveal. The extra
-  // requestAnimationFrame after that is defensive, not load-bearing --
-  // resizing the GTK window and WebKit's own view repainting at the
-  // new size are two different points in the event loop even after
-  // Python's call returns, and one rAF reliably lands after that catch
-  // -up. Not verified on real Wayland/GTK hardware from here -- there's
-  // no display in this environment to click-test against -- so this is
-  // the structural fix for the *guaranteed* race the CSS/JS ordering
-  // created, not a claim that timing on real hardware was measured.
+  //
+  // openPanel()/closePanel() used to reach into the DOM directly
+  // (un-hiding/hiding #scrim and #panel themselves) around an awaited
+  // call to Python's set_panel(). That had a real, previously-fixed
+  // race: revealing the panel's CSS before the awaited resize actually
+  // landed meant #panel's max-height (calc(100% - 48px)) resolved
+  // against the window's still-56px-tall BAR_HEIGHT for however long
+  // the resize took, clipping hard.
+  //
+  // Since overlay.py's set_panel() was generalized to also drive
+  // 'power' and 'osd' (docs/planning/REMOTE-INPUT-MAPPING.md), it now
+  // pushes the resulting panel name back into __cgSetPanel() below
+  // right after applying the resize -- see that function's own
+  // comment for why that's the *only* place any of these four
+  // states' DOM visibility changes now. openPanel()/closePanel() are
+  // reduced to just asking for the state change and letting that
+  // push (which necessarily arrives after the resize, since Python
+  // does both in the same GTK-thread callback) do the reveal --
+  // structurally the same fix as before, just with one code path
+  // instead of two.
   async function openPanel() {
     if (panelOpen || locked) return;
-    panelOpen = true;
     await callApi("set_panel", "overlay");
-    requestAnimationFrame(() => {
+  }
+
+  function closePanel() {
+    if (!panelOpen) return;
+    callApi("set_panel", "none");
+  }
+
+  // Pushed from overlay.py's SystemAPI.set_panel() after every
+  // geometry change it applies -- whether that change came from a
+  // click here (openPanel/closePanel above) or from the remote's
+  // Menu/Power button firing a Sway bindsym straight into overlay.py's
+  // own SIGUSR1/SIGUSR2 handlers, bypassing JS entirely until this
+  // push. DOM-only: this must never call back into set_panel/callApi
+  // itself, or a click-triggered change would loop forever between
+  // here and Python.
+  window.__cgSetPanel = function (panelState) {
+    if (locked) return; // lock screen owns the DOM until unlock()
+    clearTimeout(osdHideTimer);
+    osd.classList.add("hidden");
+
+    if (panelState === "power") {
+      scrim.classList.add("hidden");
+      panel.classList.add("hidden");
+      powerMenu.classList.add("hidden");
+      hideConnectForm();
+      panelOpen = false;
+      powerPanel.classList.remove("hidden");
+      requestAnimationFrame(() => powerPanelButtons[0] && powerPanelButtons[0].focus());
+      return;
+    }
+
+    powerPanel.classList.add("hidden");
+
+    if (panelState === "overlay") {
+      if (panelOpen) return; // already showing; e.g. a redundant push
+      panelOpen = true;
       scrim.classList.remove("hidden");
       panel.classList.remove("hidden");
       refreshStatus();
       if (activeTile === "network") refreshNetworkList();
       requestAnimationFrame(() => tiles[0] && tiles[0].focus());
-    });
-  }
+      return;
+    }
 
-  function closePanel() {
-    if (!panelOpen) return;
-    panelOpen = false;
-    scrim.classList.add("hidden");
-    panel.classList.add("hidden");
-    powerMenu.classList.add("hidden");
-    hideConnectForm();
-    callApi("set_panel", "none");
-    launcher.focus();
-  }
+    // Anything else (explicitly 'none', or 'osd' -- which manages its
+    // own #osd element directly in showOsd()/hideOsd() rather than
+    // through this push) collapses back to the corner bar.
+    if (panelOpen) {
+      panelOpen = false;
+      scrim.classList.add("hidden");
+      panel.classList.add("hidden");
+      powerMenu.classList.add("hidden");
+      hideConnectForm();
+      launcher.focus();
+    }
+  };
 
   launcher.addEventListener("click", openPanel);
   launcher.addEventListener("keydown", (e) => {
@@ -241,6 +286,33 @@
     callApi("poweroff");
   });
 
+  // ---- centered power menu (remote Power button, or reached from the
+  // corner dropdown above) --------------------------------------------------
+
+  document.getElementById("power-panel-shutdown").addEventListener("click", () => {
+    callApi("poweroff");
+  });
+  document.getElementById("power-panel-restart").addEventListener("click", () => {
+    callApi("reboot");
+  });
+  document.getElementById("power-panel-logout").addEventListener("click", () => {
+    callApi("logout");
+  });
+
+  powerPanel.addEventListener("keydown", (e) => {
+    const idx = powerPanelButtons.indexOf(document.activeElement);
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      powerPanelButtons[(idx + 1 + powerPanelButtons.length) % powerPanelButtons.length].focus();
+    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      powerPanelButtons[(idx - 1 + powerPanelButtons.length) % powerPanelButtons.length].focus();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      callApi("set_panel", "none");
+    }
+  });
+
   // ---- network content --------------------------------------------------------
 
   function iconForNetworkType(type) {
@@ -348,14 +420,22 @@
   }
 
   brightnessSlider.addEventListener("input", () => {
-    const level = brightnessSlider.value;
+    const level = parseInt(brightnessSlider.value, 10);
     brightnessValue.textContent = level + "%";
+    // Set the tracking var before showOsd() so the next status poll
+    // (which also drives the OSD -- see applyBrightness()) sees no
+    // further change and doesn't pop a redundant, stale toast.
+    lastBrightnessLevel = level;
+    showOsd("brightness", level, false);
     debounce("brightness", () => callApi("set_brightness", level), SLIDER_DEBOUNCE_MS);
   });
 
   volumeSlider.addEventListener("input", () => {
-    const level = volumeSlider.value;
+    const level = parseInt(volumeSlider.value, 10);
     volumeValue.textContent = level + "%";
+    lastVolumeLevel = level;
+    lastVolumeMuted = false;
+    showOsd("volume", level, false);
     debounce("volume", () => callApi("set_volume", level), SLIDER_DEBOUNCE_MS);
   });
 
@@ -371,12 +451,81 @@
     const icon = vol.muted ? "volume-muted" : "volume";
     volumeIcon.setAttribute("data-icon", icon);
     launcherVolumeIcon.setAttribute("data-icon", icon);
+    // Fires the OSD toast for changes this file didn't already know
+    // about -- chiefly the volume hardware buttons on the remote,
+    // which (per docs/planning/REMOTE-INPUT-MAPPING.md's "Volume —
+    // config only") go straight to wpctl via a Sway bindsym and never
+    // touch this file's own set_volume()/toggle_mute() at all. This
+    // status poll (every STATUS_POLL_MS) is the only way this window
+    // finds out such a change happened, so the toast can lag a
+    // hardware button press by up to that interval -- same latency
+    // the mapping doc already accepted for the plain on-screen pill
+    // this reuses. statusInitialized guards the very first poll from
+    // popping a toast for the ambient volume the session just booted
+    // with, rather than an actual change.
+    if (statusInitialized && (vol.level !== lastVolumeLevel || vol.muted !== lastVolumeMuted)) {
+      showOsd("volume", vol.level, vol.muted);
+    }
+    lastVolumeLevel = vol.level;
+    lastVolumeMuted = vol.muted;
   }
 
   function applyBrightness(b) {
     if (!b) return;
     brightnessSlider.value = b.level;
     brightnessValue.textContent = b.level + "%";
+    if (statusInitialized && b.level !== lastBrightnessLevel) {
+      showOsd("brightness", b.level, false);
+    }
+    lastBrightnessLevel = b.level;
+  }
+
+  // ---- OSD toast: transient volume/brightness indicator ----------------------
+  //
+  // TV-style "on-screen display" -- see the .osd rules in style.css and
+  // overlay.py's PANEL_GEOMETRY['osd'] for the small, centered window
+  // geometry this borrows while it's shown. Skipped entirely while the
+  // full settings panel or the lock screen is up: the sliders (or
+  // nothing at all, if locked) are already the right thing to show in
+  // those states, and set_panel('osd') would fight either one's own
+  // geometry if called on top of it.
+  let osdHideTimer = null;
+  let lastVolumeLevel = null;
+  let lastVolumeMuted = null;
+  let lastBrightnessLevel = null;
+  let statusInitialized = false;
+  const OSD_HIDE_MS = 1600;
+
+  function showOsd(kind, level, muted) {
+    if (panelOpen || locked) return;
+    osd.classList.remove("osd-volume", "osd-brightness");
+    osd.classList.add(kind === "volume" ? "osd-volume" : "osd-brightness");
+    osd.classList.remove("hidden");
+    osdValue.textContent = muted ? "Muted" : level + "%";
+    osdFill.style.width = (muted ? 0 : level) + "%";
+
+    if (kind === "volume") {
+      osdIcon.setAttribute("data-icon", muted || level === 0 ? "volume-muted" : "volume");
+      // Tiers step the glyph itself as level crosses 0/34/67% -- the
+      // "moves" half of the design brief this was built from.
+      // Brightness has no equivalent: its icon is a static sun: see
+      // the .osd.osd-volume-only rules in style.css.
+      osdIcon.classList.toggle("tier-1", !muted && level > 0);
+      osdIcon.classList.toggle("tier-2", !muted && level >= 34);
+      osdIcon.classList.toggle("tier-3", !muted && level >= 67);
+    } else {
+      osdIcon.setAttribute("data-icon", "brightness");
+      osdIcon.classList.remove("tier-1", "tier-2", "tier-3");
+    }
+
+    callApi("set_panel", "osd");
+    clearTimeout(osdHideTimer);
+    osdHideTimer = setTimeout(hideOsd, OSD_HIDE_MS);
+  }
+
+  function hideOsd() {
+    osd.classList.add("hidden");
+    if (!panelOpen && !locked) callApi("set_panel", "none");
   }
 
   // ---- status polling --------------------------------------------------------
@@ -398,6 +547,7 @@
     applyVolume(status.volume);
     applyBrightness(status.brightness);
     applyBattery(status.battery, status.is_laptop);
+    statusInitialized = true;
   }
 
   // ---- lock screen ------------------------------------------------------------
@@ -431,8 +581,19 @@
   window.__cgSetLocked = function (isLocked) {
     locked = !!isLocked;
     if (locked) {
+      // Direct DOM cleanup here, not closePanel()/callApi("set_panel",
+      // ...): overlay.py's set_panel() bails out immediately whenever
+      // self.locked is true (see its own docstring), before it would
+      // ever push a state back into __cgSetPanel -- so a round trip
+      // through Python would leave panelOpen stuck true forever with
+      // nothing left to flip it back. Reset everything locally instead.
+      clearTimeout(osdHideTimer);
+      osd.classList.add("hidden");
+      powerPanel.classList.add("hidden");
+      scrim.classList.add("hidden");
+      panel.classList.add("hidden");
       powerMenu.classList.add("hidden");
-      if (panelOpen) closePanel();
+      panelOpen = false;
       lockScreen.classList.remove("hidden");
       requestAnimationFrame(() => lockUnlockBtn.focus());
     } else {

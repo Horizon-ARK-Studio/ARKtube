@@ -47,6 +47,7 @@ each one an actual backend.
 """
 
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -61,13 +62,29 @@ from gi.repository import GLib, Gtk, GtkLayerShell  # noqa: E402
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
 
-# Window heights for each panel state. The window itself is still a
-# single fixed-width strip that grows/shrinks downward from the top-
-# right corner, same as Stage 6/8 — what's different post-cutover is
-# *why* it stays above ARKtube and pinned to that corner (see module
-# docstring: gtk-layer-shell, not x=0/y=0/on_top).
+# Window sizes for each panel state. Prior to the remote-input-mapping
+# work (docs/planning/REMOTE-INPUT-MAPPING.md) there were only two:
+# the collapsed top-right corner bar and the expanded top-right panel,
+# both full-screen-width and differing only in height. Two more states
+# were added alongside that doc's implementation:
+#
+#   - 'power': a small, centered Shut Down/Restart/Log Out menu,
+#     opened by the remote's Power button (see main()'s SIGUSR2
+#     handler) as well as by the existing power icon inside 'overlay'.
+#   - 'osd': a small, centered, top-pinned transient toast for a
+#     volume/brightness change -- not in the mapping doc, added
+#     alongside it for the same "ARKTUBE"-branded on-screen-display
+#     look real TVs show on a remote volume/brightness press.
+#
+# Both of the new states are centered rather than top-right, so they
+# need their own width *and* height, not just a height change against
+# the same full-screen width -- see PANEL_GEOMETRY below.
 BAR_HEIGHT = 56
 PANEL_HEIGHT = 620
+POWER_MENU_WIDTH = 420
+POWER_MENU_HEIGHT = 300
+OSD_WIDTH = 320
+OSD_HEIGHT = 210
 
 # Tiles that exist in the UI this stage, but have no real backend yet.
 PLACEHOLDER_TILES = {"bluetooth", "sound", "picture"}
@@ -193,6 +210,53 @@ def _update_layer_shell(gtk_window, config):
     GtkLayerShell.set_keyboard_mode(gtk_window, config["keyboard_mode"])
 
 
+# Per-panel geometry: size and layer-shell anchors, looked up by the
+# panel name set_panel() receives. 'none'/'overlay' stay anchored
+# (TOP, RIGHT) at the full screen width, same as before this table
+# existed. 'power' and 'osd' anchor to fewer edges on purpose --
+# gtk-layer-shell centers a surface on any axis where neither of that
+# axis's edges is anchored (see attach_layer_shell()'s module
+# docstring), which is what puts 'power' dead-center and 'osd'
+# horizontally centered near the top, without either of them needing
+# to know the screen's actual width the way the full-width states do.
+#
+# `size` is a callable (not a plain tuple) only so 'none'/'overlay'
+# can read api.width, which isn't known until main() queries the real
+# screen -- everything else here is a fixed constant.
+PANEL_GEOMETRY = {
+    "none": {
+        "size": lambda api: (api.width, BAR_HEIGHT),
+        "anchors": (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT),
+        "keyboard_mode": GtkLayerShell.KeyboardMode.ON_DEMAND,
+    },
+    "overlay": {
+        "size": lambda api: (api.width, PANEL_HEIGHT),
+        "anchors": (GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT),
+        # EXCLUSIVE, not ON_DEMAND -- see REMOTE-INPUT-MAPPING.md's
+        # "The keyboard-focus gap". Becoming visible doesn't grant a
+        # Wayland surface keyboard focus by itself; something has to
+        # claim it, the same way lock()/unlock() already do for the
+        # lock screen. Without this, the D-Pad would keep going to
+        # ARKtube underneath the open panel instead of the panel
+        # itself -- exactly backwards from the reference behavior.
+        "keyboard_mode": GtkLayerShell.KeyboardMode.EXCLUSIVE,
+    },
+    "power": {
+        "size": lambda api: (POWER_MENU_WIDTH, POWER_MENU_HEIGHT),
+        "anchors": (),
+        "keyboard_mode": GtkLayerShell.KeyboardMode.EXCLUSIVE,
+    },
+    "osd": {
+        "size": lambda api: (OSD_WIDTH, OSD_HEIGHT),
+        "anchors": (GtkLayerShell.Edge.TOP,),
+        # No keyboard interaction happens on the toast, so this stays
+        # ON_DEMAND rather than claiming focus away from whatever
+        # already has it (usually ARKtube itself, mid-playback).
+        "keyboard_mode": GtkLayerShell.KeyboardMode.ON_DEMAND,
+    },
+}
+
+
 class SystemAPI:
     """
     JS-callable bridge exposed to static/app.js as `pywebview.api.*`.
@@ -206,14 +270,66 @@ class SystemAPI:
     # ---- panel state ------------------------------------------------------
 
     def set_panel(self, panel):
-        """Resize the window to fit the requested panel ('none' or
-        'overlay'). Ignored while locked -- the lock screen owns the
-        window's size/anchors until unlock() runs."""
+        """Resize/reposition the window for the requested panel state:
+        'none' (collapsed corner bar), 'overlay' (the full settings
+        panel), 'power' (the new centered Shut Down/Restart/Log Out
+        menu), or 'osd' (the transient volume/brightness toast). See
+        PANEL_GEOMETRY above for what each actually looks like.
+        Ignored while locked -- the lock screen owns the window's
+        geometry until unlock() runs.
+
+        This is called from two different places: JS, via the normal
+        pywebview.api bridge (a background thread, per pywebview's own
+        threading model) when the user clicks/keys something in the
+        DOM; and this file's own SIGUSR1/SIGUSR2 handlers in main()
+        (see there), when the Menu or Power button on the remote fires
+        a Sway bindsym instead. Both need the same two things done
+        somewhere that's safe to touch GTK from -- resize the window
+        and update its gtk-layer-shell anchors/keyboard-mode -- so
+        both paths funnel through here rather than each doing it
+        themselves. GLib.idle_add marshals onto the GTK main loop
+        either way, same as lock()/unlock() already do; nesting an
+        idle_add call inside one that's already running on that loop
+        (the SIGUSR* path pre-wraps its call, see main()) is harmless,
+        it just queues one more iteration.
+
+        Once the geometry is applied, this pushes the same panel name
+        into JS via window.__cgSetPanel (see static/app.js), which is
+        what actually shows/hides the matching DOM -- this file has no
+        DOM of its own to update. That single push is now the *only*
+        place DOM visibility for these four states changes; JS's own
+        openPanel()/closePanel() no longer touch the DOM directly,
+        they just call this and wait for the push back. That also
+        means a signal-triggered open (Menu/Power) and a click-
+        triggered open converge on identical behavior instead of the
+        DOM having two different code paths to get into the same
+        visible state.
+        """
         if self.locked:
             return "locked"
-        height = PANEL_HEIGHT if panel == "overlay" else BAR_HEIGHT
-        if self.window is not None:
-            self.window.resize(self.width, height)
+        geometry = PANEL_GEOMETRY.get(panel, PANEL_GEOMETRY["none"])
+
+        def apply():
+            if self.window is None:
+                return
+            width, height = geometry["size"](self)
+            gtk_window = getattr(self.window, "native", None)
+            if gtk_window is not None:
+                _update_layer_shell(
+                    gtk_window,
+                    {
+                        "layer": GtkLayerShell.Layer.OVERLAY,
+                        "anchors": geometry["anchors"],
+                        "exclusive_zone": -1,
+                        "keyboard_mode": geometry["keyboard_mode"],
+                    },
+                )
+            self.window.resize(width, height)
+            self.window.evaluate_js(
+                f"window.__cgSetPanel && window.__cgSetPanel({panel!r})"
+            )
+
+        GLib.idle_add(apply)
         return panel
 
     # ---- status polling -----------------------------------------------------
@@ -609,6 +725,27 @@ def main():
         keyboard_mode=GtkLayerShell.KeyboardMode.ON_DEMAND,
     )
     api.window = window
+
+    # Remote-triggered panel opens (docs/planning/REMOTE-INPUT-MAPPING.md,
+    # "Menu -> open the overlay" / "Power -> a new centered panel").
+    # overlay.py is a separate process from Sway, so a `bindsym` in
+    # 20-arktube.conf can only `exec` something -- it can't call
+    # set_panel() on this already-running process directly. A POSIX
+    # signal is the cheapest bridge: Sway execs `pkill -SIGUSR1 -f
+    # overlay.py` (or SIGUSR2 for Power), this process's signal
+    # handler fires on some arbitrary thread, and GLib.idle_add
+    # marshals the actual set_panel() call onto the GTK main loop --
+    # signal handlers in Python can run at essentially any point, and
+    # GTK/WebKit calls are only safe from their own main loop thread.
+    signal.signal(
+        signal.SIGUSR1,
+        lambda *_: GLib.idle_add(lambda: api.set_panel("overlay")),
+    )
+    signal.signal(
+        signal.SIGUSR2,
+        lambda *_: GLib.idle_add(lambda: api.set_panel("power")),
+    )
+
     webview.start(gui="gtk")
 
 

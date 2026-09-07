@@ -136,6 +136,48 @@
 
   </div>
 
+  <!-- Centered power menu: a separate panel state from the corner
+       #panel's own power-menu dropdown above (that one is unchanged,
+       still opened by clicking the power icon inside the settings
+       panel). This one is opened directly by the remote's Power
+       button via overlay.py's SIGUSR2 handler -- see
+       docs/planning/REMOTE-INPUT-MAPPING.md's "Power -> a new
+       centered panel". overlay.py resizes/re-anchors the window with
+       no layer-shell anchors on either axis (PANEL_GEOMETRY['power'])
+       so it centers on screen, then pushes 'power' into
+       __cgSetPanel() below to show this markup to match -- see that
+       function in app.js. -->
+  <div id="power-panel" class="power-panel hidden" role="dialog" aria-label="Power options">
+    <div class="power-panel-title">Power</div>
+    <div class="power-panel-choices">
+      <button id="power-panel-shutdown" class="ghost-btn danger power-panel-btn" type="button">Shut Down</button>
+      <button id="power-panel-restart" class="ghost-btn power-panel-btn" type="button">Restart</button>
+      <button id="power-panel-logout" class="ghost-btn power-panel-btn" type="button">Log Out</button>
+    </div>
+  </div>
+
+  <!-- Transient volume/brightness "OSD" toast -- the TV-style popup a
+       real television shows over whatever's playing when its own
+       remote's volume/brightness buttons are pressed, branded for
+       ARKtube instead of the TV's own firmware. A separate panel
+       state from everything above: overlay.py briefly resizes/re-
+       anchors the window to a small, top-anchored-only box (which
+       gtk-layer-shell then centers horizontally, same centering trick
+       as #power-panel) and app.js auto-hides it a couple of seconds
+       later -- see showOsd()/hideOsd() in app.js. Brightness only
+       ever changes the fill bar's color/width; volume additionally
+       steps the icon itself through tiers -- see the .osd-volume
+       rules in style.css for why those are different by design, not
+       an inconsistency. -->
+  <div id="osd" class="osd hidden" role="status" aria-live="polite">
+    <div class="osd-logo"><span class="osd-logo-ark">ARK</span><span class="osd-logo-tube">TUBE</span></div>
+    <div class="osd-row">
+      <span id="osd-icon" class="osd-icon" data-icon="volume"></span>
+      <span id="osd-value" class="osd-value">--</span>
+    </div>
+    <div class="osd-bar"><div id="osd-fill" class="osd-fill"></div></div>
+  </div>
+
   <!-- Lock screen: full-viewport pane shown while SystemAPI.locked is
        true. Separate from #panel/#scrim -- lock() anchors the window's
        own layer surface to all four edges (see overlay.py), so this

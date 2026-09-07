@@ -450,6 +450,153 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- Centered power menu ---------------------------------------------------
+ * Separate from .power-menu (the small corner dropdown inside #panel,
+ * unchanged above). This one fills the whole window while it's the
+ * active panel state -- overlay.py sizes that window to
+ * POWER_MENU_WIDTH x POWER_MENU_HEIGHT and centers it via layer-shell
+ * anchors, so this just needs to fill 100% of that, same pattern as
+ * .osd below. */
+
+.power-panel {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: var(--bg-panel);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+.power-panel-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.power-panel-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  padding: 0 28px;
+}
+.power-panel-btn {
+  font-size: 17px;
+  font-weight: 600;
+  text-align: center;
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-tile);
+}
+.power-panel-btn:hover { background: var(--bg-tile-active); }
+.power-panel-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ---- OSD toast (transient volume/brightness indicator) --------------------
+ * A TV-style "on-screen display": pops up briefly on a level change,
+ * then auto-hides -- see showOsd()/hideOsd() in app.js. Same sizing
+ * approach as .power-panel above: overlay.py sizes/centers the whole
+ * window to OSD_WIDTH x OSD_HEIGHT, this fills 100% of it.
+ *
+ * The two things that move are deliberately different per the design
+ * brief this was built from: brightness only ever fills/colors the
+ * bar (.osd-fill); volume does that *and* steps the glyph itself
+ * through tiers (.osd-volume .osd-icon rules below) since a real
+ * speaker icon's waveform growing is what "the vol symbol moves"
+ * meant. Brightness's icon (a static sun) intentionally has no
+ * matching tier rule -- only its bar's width/color transitions. */
+
+.osd {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 20px 22px 24px;
+  background: linear-gradient(135deg, #0d1a3d 0%, #16307a 55%, #1c4fd6 100%);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  animation: osd-in 160ms ease-out;
+}
+
+@keyframes osd-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* "ARKTUBE" wordmark: bold, italic, slightly skewed, two-tone --
+ * same diagonal-logo shape as a TV manufacturer's own OSD branding
+ * (e.g. a Sceptre set's boot/volume screen), swapped to ARKtube's own
+ * accent color instead of copying any real brand's actual mark. */
+.osd-logo {
+  font-size: 24px;
+  font-weight: 800;
+  font-style: italic;
+  letter-spacing: 0.01em;
+  transform: skewX(-8deg);
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+.osd-logo-ark { color: var(--accent); }
+.osd-logo-tube { color: var(--text); }
+
+.osd-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.osd-icon {
+  width: 32px;
+  height: 32px;
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+/* Volume only: the glyph steps through three tiers as the level
+ * crosses 0/34/67%, growing/brightening each step -- the "moving"
+ * part. A muted or zero level swaps to the [data-icon="volume-muted"]
+ * glyph entirely (set in app.js), same convention the launcher/
+ * slider-dock icons already use elsewhere in this file. */
+.osd.osd-volume .osd-icon {
+  transition: transform 140ms ease, opacity 140ms ease;
+  transform-origin: center;
+  opacity: 0.55;
+  transform: scale(0.85);
+}
+.osd.osd-volume .osd-icon.tier-1 { opacity: 0.75; transform: scale(0.92); }
+.osd.osd-volume .osd-icon.tier-2 { opacity: 0.9; transform: scale(1); }
+.osd.osd-volume .osd-icon.tier-3 { opacity: 1; transform: scale(1.08); }
+
+.osd-value {
+  font-size: 28px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  min-width: 2.2em;
+  text-align: center;
+}
+
+.osd-bar {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+}
+.osd-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #ff8a5c);
+  transition: width 160ms ease;
+}
+
 /* ---- Lock screen ----------------------------------------------------------
  * Full-viewport, above everything else here (#scrim/#panel are closed
  * before this shows -- see app.js __cgSetLocked()). Covers the whole
