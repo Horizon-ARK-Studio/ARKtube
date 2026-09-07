@@ -93,6 +93,19 @@ else
     echo "    already gone — nothing to remove"
 fi
 
+echo "==> Restoring logind's default Power key handling"
+if [ -f /etc/systemd/logind.conf.d/90-arktube.conf ]; then
+    sudo rm -f /etc/systemd/logind.conf.d/90-arktube.conf
+    sudo systemctl restart systemd-logind
+else
+    echo "    already gone — nothing to remove"
+fi
+# The video-group membership install.sh grants for brightnessctl is
+# deliberately left alone here, same reasoning as leaving the pip
+# packages below: it's a general account permission (any other
+# brightness/backlight tool on the same account benefits from it too),
+# not something ARKtube-specific to claw back on uninstall.
+
 echo "==> Removing the deployed overlay"
 if pgrep -f "$HOME/.local/share/arktube-overlay/overlay.py" >/dev/null 2>&1; then
     pkill -f "$HOME/.local/share/arktube-overlay/overlay.py" || true

@@ -79,6 +79,41 @@ install -Dm644 "${SESSION}/systemd/user/sway-session.target" \
     "${HOME}/.config/systemd/user/sway-session.target"
 systemctl --user daemon-reload 2>/dev/null || true
 
+# systemd-logind's own default (HandlePowerKey=poweroff, see logind.conf(5))
+# grabs the physical power button directly at the seat level and runs its
+# own immediate `systemctl poweroff` the instant the key event arrives —
+# independently of, and faster than, anything a compositor's `bindsym` can
+# do about it. GNOME/KDE never hit this because gnome-shell/kwin each take
+# out logind's own "handle-power-key" inhibitor lock so they can show their
+# own power dialog instead; Sway does neither, so without this, the
+# XF86PowerOff bindsym in 20-arktube.conf never gets a chance to run at all
+# — pressing Power just shuts the machine down, no overlay, confirmed
+# against logind.conf(5)'s own documented default and the sway/i3/etc.
+# community's own standard fix for exactly this. A drop-in, not an edit to
+# the package-owned /etc/systemd/logind.conf itself, for the same reason
+# this project has always preferred sibling files over in-place edits (see
+# the gear-menu step above). This takes effect after `systemctl restart
+# systemd-logind` (done below) or the next reboot; existing sessions are
+# not otherwise disturbed by that restart.
+echo "==> Handing the physical Power key to ARKtube's own overlay, not logind"
+sudo mkdir -p /etc/systemd/logind.conf.d
+cat <<'EOF' | sudo tee /etc/systemd/logind.conf.d/90-arktube.conf >/dev/null
+[Login]
+HandlePowerKey=ignore
+EOF
+sudo systemctl restart systemd-logind
+
+# brightnessctl (installed above) writes to /sys/class/backlight/*/brightness,
+# which its own udev rules (installed by the brightnessctl package) only
+# grant to the `video` group — without this, `brightnessctl set` fails
+# with "Permission denied" for any non-root user, silently, since Sway's
+# `exec` discards the command's stderr. Confirmed against brightnessctl's
+# own upstream docs and udev rules. Membership takes effect on next login,
+# same as any other group change — a fresh GDM login after this script
+# finishes is enough, no reboot required.
+echo "==> Adding $(whoami) to the video group, for brightnessctl"
+sudo usermod -aG video "$(whoami)"
+
 echo "==> Deploying the system overlay"
 mkdir -p "${HOME}/.local/share/arktube-overlay/static"
 install -Dm755 "${OVERLAY}/overlay.py" "${HOME}/.local/share/arktube-overlay/overlay.py"
@@ -107,12 +142,33 @@ branch could salvage overlay.py byte-for-byte from webtop in the first
 place. There is still no PIN/credential check behind Lock — see overlay.py's
 own lock() docstring for why that's intentional, not an oversight.
 
-Remote input (Menu/Power/Volume/cursor auto-hide) is now wired per
-docs/planning/REMOTE-INPUT-MAPPING.md — see that doc's own "Open
-verification items" for what's still unconfirmed against real
-hardware (chiefly: the Menu button's exact keysym, and whether the
-specific remote/dongle being paired delivers Power/Volume/Mute to
-this box as Bluetooth HID at all, versus only to the TV via IR/CEC).
+Remote input (Menu/Power/Volume/Brightness/cursor auto-hide) is now
+wired per docs/planning/REMOTE-INPUT-MAPPING.md. Two real bugs found
+against physical hardware are fixed by this run:
+
+  * Power used to shut the machine down instantly with no overlay —
+    that was systemd-logind's own default handling of the physical
+    key racing (and winning) against Sway's bindsym, not a bug in
+    20-arktube.conf or overlay.py. Fixed by the logind drop-in above;
+    confirm with a real Power-button press after this script's
+    `systemctl restart systemd-logind` (or after your next reboot).
+  * Brightness keys silently did nothing — brightnessctl needs `video`
+    group membership to write to /sys/class/backlight/*, which this
+    script now grants. Log out and back in for that to take effect;
+    `groups` should list `video` afterward.
+
+If Volume specifically still does nothing after logging back in,
+that's not something this script can fix blindly — check, as this
+project's own methodology elsewhere prefers, rather than guess:
+
+  * `wpctl status` — confirms PipeWire/WirePlumber are actually
+    running in this session and can see a sink at all.
+  * Run `wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+` by hand in a
+    terminal inside the ARKtube session — if that changes the level
+    but the physical key still doesn't, the key isn't reaching Sway as
+    the `XF86AudioRaiseVolume` keysym 20-arktube.conf binds; `wev` (or
+    `sway -d`'s own key-event logging) shows what keysym, if any, the
+    key actually sends.
 
 Not yet resolved by this script, and worth checking against a real
 display before calling this done:

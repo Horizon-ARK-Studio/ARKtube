@@ -201,6 +201,27 @@ the actual installed/actual device rather than assuming:
       was already sufficient. `$mod+s` was added as a second, always-
       available path to the same signal that doesn't depend on the
       remote's Menu button or a `Menu`-key-equipped keyboard at all.
+- [x] Power button, against a real keyboard: `XF86PowerOff` reached
+      Sway's bindsym fine, but systemd-logind's own default
+      (`HandlePowerKey=poweroff`, logind.conf(5)) grabs the physical
+      key at the seat level and ran its own immediate poweroff first —
+      the same conflict GNOME/KDE avoid only because they take
+      logind's "handle-power-key" inhibitor lock themselves, which
+      Sway does not. Fixed with a `HandlePowerKey=ignore` drop-in
+      (install.sh); confirmed the bindsym-driven power panel opens
+      instead once that's in place.
+- [x] Brightness keys, against a real keyboard: `brightnessctl set`
+      failed silently with "Permission denied" for a non-root user
+      not in the `video` group — its own udev rules only grant
+      /sys/class/backlight/*/brightness to that group. install.sh now
+      adds the installing user to `video`.
+- [ ] Volume, against real hardware: still not independently
+      confirmed working end-to-end on a real machine the way Power
+      and Brightness now are — if it doesn't respond, check
+      `wpctl status` (PipeWire/WirePlumber actually running this
+      session) and confirm the physical key emits
+      `XF86AudioRaiseVolume`/`LowerVolume`/`Mute` at all (`wev`) before
+      assuming this doc's binding is at fault.
 - [ ] Whether the specific remote/dongle being paired delivers
       Power/Volume/Mute to this box as Bluetooth HID at all, or only
       drives the TV via IR/HDMI-CEC (confirmed to vary by remote
