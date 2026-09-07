@@ -714,7 +714,46 @@ def main():
         frameless=True,
         on_top=True,
         transparent=True,
-        resizable=False,
+        # MUST be True, not False. pywebview's GTK backend
+        # (webview/platforms/gtk.py, BrowserView.__init__) branches on
+        # this at window-construction time, before gtk-layer-shell ever
+        # gets involved:
+        #
+        #   if window.resizable:
+        #       self.window.set_size_request(*window.min_size)
+        #       self.window.resize(window.initial_width, window.initial_height)
+        #   else:
+        #       self.window.set_size_request(window.initial_width, window.initial_height)
+        #
+        # With resizable=False (what this was), that `else` locks
+        # GTK's minimum-size floor to this call's own width/height --
+        # (api.width, BAR_HEIGHT), i.e. the full-width 56px corner bar
+        # -- permanently. set_panel()'s later self.window.resize()
+        # calls (the only thing that ever runs for 'osd'/'power'/
+        # 'overlay') never touch that floor again, so GTK keeps
+        # re-clamping the window back toward it: the 320x210 OSD toast
+        # and 420x300 power menu can never actually shrink to their
+        # real size, and fighting that floor against whatever the
+        # compositor negotiates for the layer-shell surface is what
+        # was taking overlay.py down entirely on the first Power
+        # press (see PANEL_GEOMETRY['power'] below and
+        # docs/planning/REMOTE-INPUT-MAPPING.md) -- which is also why
+        # a second physical Power press reached logind's own default
+        # handler and shut the machine down: nothing was left running
+        # to hold the `systemd-inhibit --what=handle-power-key` lock
+        # 20-arktube.conf now execs this file through.
+        #
+        # resizable=True takes the `if` branch above instead, which
+        # sets the floor from `min_size` -- explicitly given below as
+        # the smallest width and height any real panel state uses
+        # (OSD_WIDTH x BAR_HEIGHT), not pywebview's own default
+        # (200x100, which is itself taller than BAR_HEIGHT and would
+        # wrongly floor the collapsed corner bar). That floor is at or
+        # below every PANEL_GEOMETRY entry on both axes, so it never
+        # clamps any of them upward, and self.window.resize() actually
+        # takes effect afterwards the way set_panel() expects.
+        resizable=True,
+        min_size=(OSD_WIDTH, BAR_HEIGHT),
         easy_drag=False,
     )
     attach_layer_shell(

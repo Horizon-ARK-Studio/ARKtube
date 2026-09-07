@@ -129,6 +129,23 @@
   // here and Python.
   window.__cgSetPanel = function (panelState) {
     if (locked) return; // lock screen owns the DOM until unlock()
+
+    // 'osd' is the one state this function must NOT hide #osd for.
+    // showOsd() (below) already unhid #osd and filled in its content
+    // *before* calling callApi("set_panel", "osd") -- that RPC round
+    // -trips through Python's set_panel() and lands right back here
+    // with panelState === "osd" once the resize is applied. The
+    // unconditional `osd.classList.add("hidden")` that used to run
+    // above this check ran on every push, including that one, so the
+    // toast was re-hidden in the same tick it was shown: on real
+    // hardware this reads as "the brightness/volume keys work but no
+    // OSD ever appears" -- confirmed by checking showOsd()'s own
+    // call sequence, not a Wayland/compositor issue at all.
+    if (panelState === "osd") {
+      powerPanel.classList.add("hidden"); // still clear a stale power menu
+      return;
+    }
+
     clearTimeout(osdHideTimer);
     osd.classList.add("hidden");
 
