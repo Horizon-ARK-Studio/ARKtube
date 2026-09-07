@@ -427,30 +427,339 @@ static void arktube_remap_remote_keyval(GdkEventKey *event) {
     }
 }
 
-/* System settings overlay -- stage 1 skeleton only (see the chat that
-   led here: this replaces the separate overlay.py + wlr-layer-shell-v1
-   process the arktube-layer-shell branch used under Sway, which fought
-   a real class of Sway/wlroots bugs around fullscreen-global surfaces
-   vs. the overlay layer -- pointer events not reaching an overlay-layer
-   surface while this app is "fullscreen global", and rendering damage
-   glitches from direct scan-out interacting with a second layer-shell
-   client. Folding the panel into this same process and GtkOverlay
-   sidesteps both: it's ordinary GTK widget stacking inside one window,
-   not a second compositor surface racing this one for a layer.
+/* System settings overlay. See docs/foundational/OVERLAY.md for the
+   full staged plan and why this replaced the separate overlay.py +
+   wlr-layer-shell-v1 process the arktube-layer-shell branch used under
+   Sway -- in short, that design fought a real class of Sway/wlroots
+   bugs around fullscreen-global surfaces vs. the overlay layer
+   (pointer events not reaching an overlay-layer surface while this app
+   is "fullscreen global", and rendering damage glitches from direct
+   scan-out interacting with a second layer-shell client). Folding the
+   panel into this same process and GtkOverlay sidesteps both: it's
+   ordinary GTK widget stacking inside one window, not a second
+   compositor surface racing this one for a layer.
 
-   Deliberately no small always-on corner "pill" affordance this stage
-   -- just the panel itself, empty for now, toggled fully open/closed.
-   Network/volume/brightness/power controls (the actual point of the
-   overlay) are follow-up work; this stage only proves out placement
-   and the toggle. */
+   Stage 1 (previous commit) proved out placement and the toggle with
+   an empty panel. Stage 2 (here) ports the real controls from
+   overlay.py: Volume and Brightness (live status + adjust), Network
+   (status only), and Power (Restart/Shut Down/Log Out). No small
+   always-on corner "pill" affordance -- the panel toggles fully
+   open/closed, same as stage 1. */
 #define ARKTUBE_SETTINGS_PANEL_HEIGHT 260
+#define ARKTUBE_OVERLAY_POLL_INTERVAL_MS 3000
+#define ARKTUBE_VOLUME_STEP "5%"
+#define ARKTUBE_BRIGHTNESS_STEP "5%"
 
-static void arktube_toggle_settings_panel(GtkWidget *panel) {
-    if (gtk_widget_get_visible(panel)) {
-        gtk_widget_hide(panel);
-    } else {
-        gtk_widget_show(panel);
+typedef struct {
+    GtkWidget *panel;
+    GtkWidget *volume_label;
+    GtkWidget *brightness_label;
+    GtkWidget *network_label;
+    guint poll_source_id; /* 0 when not polling (panel hidden) */
+} ArktubeOverlayState;
+
+/* Runs a local command and returns its stripped stdout, or NULL on any
+   failure (nonzero exit, spawn failure, or the binary missing) --
+   direct C equivalent of overlay.py's own run(), including its
+   contract that every caller treats NULL as "control unavailable" and
+   degrades the label rather than crashing. argv must be NULL-terminated;
+   g_spawn_sync() (not system()/popen()) is used throughout so no shell
+   is involved and nothing here is vulnerable to argument injection. */
+static gchar *arktube_overlay_run(gchar **argv) {
+    gchar *stdout_buf = NULL;
+    gchar *stderr_buf = NULL;
+    gint exit_status = 0;
+    GError *error = NULL;
+
+    gboolean ok = g_spawn_sync(
+        NULL, argv, NULL,
+        G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL,
+        NULL, NULL,
+        &stdout_buf, &stderr_buf, &exit_status, &error);
+
+    g_free(stderr_buf);
+    g_clear_error(&error);
+
+    if (!ok || !g_spawn_check_wait_status(exit_status, NULL)) {
+        g_free(stdout_buf);
+        return NULL;
     }
+
+    if (stdout_buf) {
+        g_strstrip(stdout_buf);
+    }
+    return stdout_buf;
+}
+
+/* Fire-and-forget variant for controls that just change state (volume
+   up/down, brightness up/down, power actions) where this app doesn't
+   need to wait on or read the result -- g_spawn_async() so a slow or
+   hanging child (e.g. a systemctl call blocked on a policykit prompt)
+   can't stall the GTK main loop the way g_spawn_sync() would. */
+static void arktube_overlay_run_async(gchar **argv) {
+    GError *error = NULL;
+    if (!g_spawn_async(
+            NULL, argv, NULL,
+            G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+            NULL, NULL, NULL, &error)) {
+        g_warning("ARKtube overlay: could not run '%s': %s", argv[0],
+                  error ? error->message : "unknown error");
+        g_clear_error(&error);
+    }
+}
+
+/* --- Volume: wpctl (PipeWire/WirePlumber), matching overlay.py's own
+   choice -- no PulseAudio pactl fallback yet in this stage; see
+   docs/foundational/OVERLAY.md's "Not yet ported" list. */
+static void arktube_overlay_refresh_volume(GtkWidget *label) {
+    gchar *argv[] = {"wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@", NULL};
+    gchar *out = arktube_overlay_run(argv);
+    if (!out) {
+        gtk_label_set_text(GTK_LABEL(label), "Volume: unavailable");
+        return;
+    }
+
+    /* wpctl prints e.g. "Volume: 0.45" or "Volume: 0.45 [MUTED]" --
+       parse the fraction ourselves rather than depending on a second
+       tool, since this is the one piece of that line this app needs. */
+    gdouble fraction = 0.0;
+    gboolean muted = (strstr(out, "MUTED") != NULL);
+    const gchar *colon = strchr(out, ':');
+    if (colon) {
+        fraction = g_ascii_strtod(colon + 1, NULL);
+    }
+    gint percent = (gint)lround(fraction * 100.0);
+
+    gchar *text = g_strdup_printf("Volume: %d%%%s", percent, muted ? " (muted)" : "");
+    gtk_label_set_text(GTK_LABEL(label), text);
+    g_free(text);
+    g_free(out);
+}
+
+/* g_timeout_add() requires a GSourceFunc (gboolean(*)(gpointer)); the
+   refresh functions are void(*)(GtkWidget*), a real signature mismatch
+   that a bare (GSourceFunc) cast would silently paper over (and did,
+   until -Wcast-function-type caught it) rather than actually fixing.
+   These one-line wrappers give g_timeout_add() the signature it wants
+   and always return G_SOURCE_REMOVE, since every call site here is a
+   one-shot "refresh shortly after this change" delay, not a repeating
+   poll -- arktube_overlay_refresh_all() below is the repeating one. */
+static gboolean arktube_overlay_refresh_volume_once(gpointer label) {
+    arktube_overlay_refresh_volume(GTK_WIDGET(label));
+    return G_SOURCE_REMOVE;
+}
+
+static void on_volume_up_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    gchar *argv[] = {"wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@",
+                      ARKTUBE_VOLUME_STEP "+", NULL};
+    arktube_overlay_run_async(argv);
+    /* Sway's own volume bindsyms (see 20-arktube.conf on the
+       arktube-layer-shell branch) already call wpctl directly and don't
+       need this app running at all -- this button is for the case where
+       the panel itself is being driven (mouse/remote D-pad on the tile)
+       rather than a hardware volume key. A short delay before refreshing
+       gives wpctl's own change time to land before this app reads it
+       back. */
+    g_timeout_add(150, arktube_overlay_refresh_volume_once, user_data);
+}
+
+static void on_volume_down_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    gchar *argv[] = {"wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@",
+                      ARKTUBE_VOLUME_STEP "-", NULL};
+    arktube_overlay_run_async(argv);
+    g_timeout_add(150, arktube_overlay_refresh_volume_once, user_data);
+}
+
+/* --- Brightness: brightnessctl, matching overlay.py. Unlike volume,
+   brightnessctl has no single "current %" output -- current/max are
+   two separate reads, so this computes the percentage itself. */
+static void arktube_overlay_refresh_brightness(GtkWidget *label) {
+    gchar *cur_argv[] = {"brightnessctl", "get", NULL};
+    gchar *max_argv[] = {"brightnessctl", "max", NULL};
+    gchar *cur = arktube_overlay_run(cur_argv);
+    gchar *max = arktube_overlay_run(max_argv);
+
+    if (!cur || !max) {
+        gtk_label_set_text(GTK_LABEL(label), "Brightness: unavailable");
+        g_free(cur);
+        g_free(max);
+        return;
+    }
+
+    gint64 cur_val = g_ascii_strtoll(cur, NULL, 10);
+    gint64 max_val = g_ascii_strtoll(max, NULL, 10);
+    gint percent = (max_val > 0) ? (gint)((cur_val * 100) / max_val) : 0;
+
+    gchar *text = g_strdup_printf("Brightness: %d%%", percent);
+    gtk_label_set_text(GTK_LABEL(label), text);
+    g_free(text);
+    g_free(cur);
+    g_free(max);
+}
+
+static gboolean arktube_overlay_refresh_brightness_once(gpointer label) {
+    arktube_overlay_refresh_brightness(GTK_WIDGET(label));
+    return G_SOURCE_REMOVE;
+}
+
+static void on_brightness_up_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    gchar *argv[] = {"brightnessctl", "set", ARKTUBE_BRIGHTNESS_STEP "+", NULL};
+    arktube_overlay_run_async(argv);
+    g_timeout_add(150, arktube_overlay_refresh_brightness_once, user_data);
+}
+
+static void on_brightness_down_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    gchar *argv[] = {"brightnessctl", "set", ARKTUBE_BRIGHTNESS_STEP "-", NULL};
+    arktube_overlay_run_async(argv);
+    g_timeout_add(150, arktube_overlay_refresh_brightness_once, user_data);
+}
+
+/* --- Network: status only this stage, matching overlay.py's own
+   PLACEHOLDER_TILES staging note -- a real Wi-Fi picker (nmcli device
+   wifi list / connect) is follow-up work; see
+   docs/foundational/OVERLAY.md. This reuses the same connectivity
+   signal the boot/no-internet screen already established
+   (arktube_check_internet_now(), a raw connect(2) probe) rather than
+   asking nmcli for its own notion of "connected", so the overlay's
+   network tile and the no-internet screen can never disagree about
+   whether this box is online. */
+static void arktube_overlay_refresh_network(GtkWidget *label) {
+    gboolean online = arktube_check_internet_now();
+    gtk_label_set_text(GTK_LABEL(label), online ? "Network: Connected" : "Network: No internet");
+}
+
+/* --- Power: Restart / Shut Down / Log Out. Same primitives and same
+   reasoning overlay.py's own logout() documents on the
+   arktube-layer-shell branch (prefer $XDG_SESSION_ID, which
+   systemd-logind's pam_systemd already exports, over the "show-session
+   self" query; never call terminate-session/terminate-user with an
+   empty argument). No confirmation dialog yet -- see
+   docs/foundational/OVERLAY.md's "Not yet ported" list; a stray
+   Menu-then-tap on this tile is currently one click from actually
+   shutting the box down, unlike overlay.py's dedicated centered
+   'power' panel state which existed partly to make that a deliberate
+   second action. */
+static void on_restart_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    gchar *argv[] = {"systemctl", "reboot", NULL};
+    arktube_overlay_run_async(argv);
+}
+
+static void on_shutdown_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    gchar *argv[] = {"systemctl", "poweroff", NULL};
+    arktube_overlay_run_async(argv);
+}
+
+static void on_logout_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+
+    const gchar *session_id = g_getenv("XDG_SESSION_ID");
+    gchar *queried = NULL;
+    if (!session_id || !*session_id) {
+        gchar *argv[] = {"loginctl", "show-session", "self", "-p", "Id", "--value", NULL};
+        queried = arktube_overlay_run(argv);
+        session_id = (queried && *queried) ? queried : NULL;
+    }
+
+    if (session_id) {
+        gchar *argv[] = {"loginctl", "terminate-session", (gchar *)session_id, NULL};
+        arktube_overlay_run_async(argv);
+    } else {
+        /* Same last-resort fallback as overlay.py: close our own window
+           rather than ever calling terminate-session/terminate-user with
+           an empty argument. With no session ID resolvable at all, quitting
+           this app is the safest thing left to do here. */
+        gtk_main_quit();
+    }
+    g_free(queried);
+}
+
+/* Refreshes every live-status label. Called once immediately when the
+   panel opens (so it never shows stale/blank text on first paint) and
+   then on a timer for as long as the panel stays open -- see
+   arktube_toggle_settings_panel() below, which starts/stops that timer
+   rather than polling nmcli/wpctl/brightnessctl the whole time this app
+   is running, matching overlay.py's own reasoning for only ever paying
+   this cost while someone is actually looking at the panel. */
+static gboolean arktube_overlay_refresh_all(gpointer user_data) {
+    ArktubeOverlayState *state = (ArktubeOverlayState *)user_data;
+    arktube_overlay_refresh_volume(state->volume_label);
+    arktube_overlay_refresh_brightness(state->brightness_label);
+    arktube_overlay_refresh_network(state->network_label);
+    return G_SOURCE_CONTINUE;
+}
+
+static void arktube_toggle_settings_panel(ArktubeOverlayState *state) {
+    if (gtk_widget_get_visible(state->panel)) {
+        gtk_widget_hide(state->panel);
+        if (state->poll_source_id != 0) {
+            g_source_remove(state->poll_source_id);
+            state->poll_source_id = 0;
+        }
+        return;
+    }
+
+    gtk_widget_show(state->panel);
+    arktube_overlay_refresh_all(state); /* paint real values immediately */
+    state->poll_source_id = g_timeout_add(
+        ARKTUBE_OVERLAY_POLL_INTERVAL_MS, arktube_overlay_refresh_all, state);
+}
+
+/* Builds one tile: a vertical box with a live-status label on top and a
+   row of action buttons below. `label_out`, if non-NULL, receives the
+   status label so callers can wire it into ArktubeOverlayState for
+   polling. Buttons are declared as {text, callback} pairs so each tile
+   call site stays a flat, readable list instead of repeated
+   gtk_button_new()/g_signal_connect() boilerplate.
+
+   Every button's "clicked" user_data is this tile's own status_label
+   (not a separate parameter) -- the label is what on_volume_up_clicked()
+   and friends need to refresh after acting, and connecting it directly
+   here (rather than trying to backfill it once the label exists, which
+   g_signal_connect() can't do after the fact) is what actually gets the
+   right pointer into each callback. Power's buttons ignore user_data
+   entirely, so passing the label there too is harmless. */
+typedef struct {
+    const gchar *text;
+    GCallback callback;
+} ArktubeOverlayButtonSpec;
+
+static GtkWidget *arktube_overlay_create_tile(
+        const gchar *initial_status_text, GtkWidget **label_out,
+        const ArktubeOverlayButtonSpec *buttons, gsize n_buttons) {
+    GtkWidget *tile = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    gtk_widget_set_margin_start(tile, 24);
+    gtk_widget_set_margin_end(tile, 24);
+    gtk_widget_set_margin_top(tile, 16);
+    gtk_widget_set_margin_bottom(tile, 16);
+
+    GtkWidget *status_label = gtk_label_new(initial_status_text);
+    gtk_widget_set_halign(status_label, GTK_ALIGN_CENTER);
+    gtk_box_pack_start(GTK_BOX(tile), status_label, FALSE, FALSE, 0);
+    if (label_out) {
+        *label_out = status_label;
+    }
+
+    if (n_buttons > 0) {
+        GtkWidget *button_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        gtk_widget_set_halign(button_row, GTK_ALIGN_CENTER);
+        for (gsize i = 0; i < n_buttons; i++) {
+            GtkWidget *btn = gtk_button_new_with_label(buttons[i].text);
+            g_signal_connect(btn, "clicked", buttons[i].callback, status_label);
+            gtk_box_pack_start(GTK_BOX(button_row), btn, FALSE, FALSE, 0);
+        }
+        gtk_box_pack_start(GTK_BOX(tile), button_row, FALSE, FALSE, 0);
+    }
+
+    return tile;
 }
 
 /* Full-width panel anchored to the top of the window (matching the
@@ -461,8 +770,12 @@ static void arktube_toggle_settings_panel(GtkWidget *panel) {
    pair. Hidden by default (gtk_widget_set_no_show_all() so the later
    gtk_widget_show_all(window) in main() can't force it open) --
    arktube_toggle_settings_panel() above is the only thing that ever
-   shows it. */
-static GtkWidget *arktube_create_settings_panel(void) {
+   shows it.
+
+   `state` is filled in here (status labels) but owned by the caller
+   (main()), which also needs it for the key-press handler -- see
+   ARktubeOverlayState's own comment. */
+static GtkWidget *arktube_create_settings_panel(ArktubeOverlayState *state) {
     GtkWidget *panel = gtk_event_box_new();
     gtk_widget_set_name(panel, "arktube-settings-panel");
     gtk_widget_set_size_request(panel, -1, ARKTUBE_SETTINGS_PANEL_HEIGHT);
@@ -474,20 +787,48 @@ static GtkWidget *arktube_create_settings_panel(void) {
     gtk_css_provider_load_from_data(
         css,
         "#arktube-settings-panel { background-color: rgba(15, 15, 15, 0.92); }"
-        "#arktube-settings-panel label { color: #ffffff; font-size: 20px; }",
+        "#arktube-settings-panel label { color: #ffffff; font-size: 18px; }"
+        "#arktube-settings-panel button { font-size: 16px; padding: 6px 14px; }",
         -1, NULL);
     gtk_style_context_add_provider(
         gtk_widget_get_style_context(panel),
         GTK_STYLE_PROVIDER(css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css);
 
-    /* Placeholder content only -- real tiles (Network/Volume/Brightness/
-       Power, per the overlay.py branch's PANEL_GEOMETRY/PLACEHOLDER_TILES)
-       land in a follow-up pass. */
-    GtkWidget *label = gtk_label_new("ARKtube Settings (placeholder)");
-    gtk_widget_set_halign(label, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(label, GTK_ALIGN_CENTER);
-    gtk_container_add(GTK_CONTAINER(panel), label);
+    GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_halign(row, GTK_ALIGN_CENTER);
+    gtk_widget_set_valign(row, GTK_ALIGN_CENTER);
+    gtk_container_add(GTK_CONTAINER(panel), row);
+
+    const ArktubeOverlayButtonSpec volume_buttons[] = {
+        {"-", G_CALLBACK(on_volume_down_clicked)},
+        {"+", G_CALLBACK(on_volume_up_clicked)},
+    };
+    GtkWidget *volume_tile = arktube_overlay_create_tile(
+        "Volume: --", &state->volume_label, volume_buttons, G_N_ELEMENTS(volume_buttons));
+    gtk_box_pack_start(GTK_BOX(row), volume_tile, FALSE, FALSE, 0);
+
+    const ArktubeOverlayButtonSpec brightness_buttons[] = {
+        {"-", G_CALLBACK(on_brightness_down_clicked)},
+        {"+", G_CALLBACK(on_brightness_up_clicked)},
+    };
+    GtkWidget *brightness_tile = arktube_overlay_create_tile(
+        "Brightness: --", &state->brightness_label,
+        brightness_buttons, G_N_ELEMENTS(brightness_buttons));
+    gtk_box_pack_start(GTK_BOX(row), brightness_tile, FALSE, FALSE, 0);
+
+    GtkWidget *network_tile = arktube_overlay_create_tile(
+        "Network: --", &state->network_label, NULL, 0);
+    gtk_box_pack_start(GTK_BOX(row), network_tile, FALSE, FALSE, 0);
+
+    const ArktubeOverlayButtonSpec power_buttons[] = {
+        {"Restart", G_CALLBACK(on_restart_clicked)},
+        {"Shut Down", G_CALLBACK(on_shutdown_clicked)},
+        {"Log Out", G_CALLBACK(on_logout_clicked)},
+    };
+    GtkWidget *power_tile = arktube_overlay_create_tile(
+        "Power", NULL, power_buttons, G_N_ELEMENTS(power_buttons));
+    gtk_box_pack_start(GTK_BOX(row), power_tile, FALSE, FALSE, 0);
 
     gtk_widget_set_no_show_all(panel, TRUE);
     gtk_widget_hide(panel);
@@ -503,7 +844,7 @@ static GtkWidget *arktube_create_settings_panel(void) {
    or its local-shell-page fallback did. */
 static gboolean on_window_key_press(GtkWidget *widget, GdkEventKey *event,
                                      gpointer user_data) {
-    GtkWidget *settings_panel = GTK_WIDGET(user_data);
+    ArktubeOverlayState *overlay_state = (ArktubeOverlayState *)user_data;
 
     arktube_remap_remote_keyval(event);
 
@@ -517,12 +858,12 @@ static gboolean on_window_key_press(GtkWidget *widget, GdkEventKey *event,
            itself, ahead of youtube.com/tv's own keydown handling, the
            same way F11/Escape already do below. */
         case GDK_KEY_Menu:
-            arktube_toggle_settings_panel(settings_panel);
+            arktube_toggle_settings_panel(overlay_state);
             return TRUE;
 
         case GDK_KEY_s:
             if (event->state & GDK_SUPER_MASK) {
-                arktube_toggle_settings_panel(settings_panel);
+                arktube_toggle_settings_panel(overlay_state);
                 return TRUE;
             }
             return FALSE;
@@ -1191,11 +1532,15 @@ int main(int argc, char **argv) {
        window, not a second top-level surface. Created (and hidden) up
        front, unconditionally, rather than lazily on first Menu press,
        so the very first keypress can toggle it with no first-use
-       delay. */
-    GtkWidget *settings_panel = arktube_create_settings_panel();
-    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), settings_panel);
+       delay. overlay_state is heap-allocated (not stack) because it
+       needs to outlive main()'s own stack frame -- gtk_main() below
+       runs the whole rest of the app's life, and the poll timer /
+       key-press handler both keep using this pointer the entire time. */
+    ArktubeOverlayState *overlay_state = g_new0(ArktubeOverlayState, 1);
+    overlay_state->panel = arktube_create_settings_panel(overlay_state);
+    gtk_overlay_add_overlay(GTK_OVERLAY(root_overlay), overlay_state->panel);
 
-    g_signal_connect(window, "key-press-event", G_CALLBACK(on_window_key_press), settings_panel);
+    g_signal_connect(window, "key-press-event", G_CALLBACK(on_window_key_press), overlay_state);
     g_signal_connect(window, "delete-event", G_CALLBACK(on_window_delete), NULL);
 
     /* Connected before load_uri() below so "load-changed" can't possibly
@@ -1231,5 +1576,11 @@ int main(int argc, char **argv) {
     g_free(connectivity_state);
 
     g_free(splash_state);
+
+    if (overlay_state->poll_source_id != 0) {
+        g_source_remove(overlay_state->poll_source_id);
+    }
+    g_free(overlay_state);
+
     return EXIT_SUCCESS;
 }
