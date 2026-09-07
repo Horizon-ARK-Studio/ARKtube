@@ -87,21 +87,15 @@ systemctl --user daemon-reload 2>/dev/null || true
 # out logind's own "handle-power-key" inhibitor lock so they can show their
 # own power dialog instead; Sway does neither, so without this, the
 # XF86PowerOff bindsym in 20-arktube.conf never gets a chance to run at all
-# — pressing Power just shuts the machine down, no overlay, confirmed
-# against logind.conf(5)'s own documented default and the sway/i3/etc.
-# community's own standard fix for exactly this. A drop-in, not an edit to
-# the package-owned /etc/systemd/logind.conf itself, for the same reason
-# this project has always preferred sibling files over in-place edits (see
-# the gear-menu step above). This takes effect after `systemctl restart
-# systemd-logind` (done below) or the next reboot; existing sessions are
-# not otherwise disturbed by that restart.
-echo "==> Handing the physical Power key to ARKtube's own overlay, not logind"
-sudo mkdir -p /etc/systemd/logind.conf.d
-cat <<'EOF' | sudo tee /etc/systemd/logind.conf.d/90-arktube.conf >/dev/null
-[Login]
-HandlePowerKey=ignore
-EOF
-sudo systemctl restart systemd-logind
+# — pressing Power just shuts the machine down, no overlay.
+#
+# Fixed the GNOME way, not the config-file way: 20-arktube.conf now execs
+# overlay.py through `systemd-inhibit --what=handle-power-key --mode=block`,
+# which takes the same logind inhibitor lock gnome-session/gnome-shell take
+# on every GNOME session — no /etc/systemd file written, no systemd daemon
+# restarted here. The lock is scoped to overlay.py's own process lifetime
+# and releases itself on logout, so there's nothing for this script (or
+# uninstall.sh) to install or clean up for it.
 
 # brightnessctl (installed above) writes to /sys/class/backlight/*/brightness,
 # which its own udev rules (installed by the brightnessctl package) only
@@ -149,9 +143,12 @@ against physical hardware are fixed by this run:
   * Power used to shut the machine down instantly with no overlay —
     that was systemd-logind's own default handling of the physical
     key racing (and winning) against Sway's bindsym, not a bug in
-    20-arktube.conf or overlay.py. Fixed by the logind drop-in above;
-    confirm with a real Power-button press after this script's
-    `systemctl restart systemd-logind` (or after your next reboot).
+    20-arktube.conf or overlay.py. Fixed by the `systemd-inhibit
+    --what=handle-power-key --mode=block` wrapper 20-arktube.conf now
+    execs overlay.py through — the same kind of logind inhibitor lock
+    GNOME takes, held for as long as overlay.py runs. Takes effect
+    the next time the ARKtube session starts (log out and back in, or
+    reboot); no systemd restart needed for this one.
   * Brightness keys silently did nothing — brightnessctl needs `video`
     group membership to write to /sys/class/backlight/*, which this
     script now grants. Log out and back in for that to take effect;

@@ -93,13 +93,13 @@ else
     echo "    already gone — nothing to remove"
 fi
 
-echo "==> Restoring logind's default Power key handling"
-if [ -f /etc/systemd/logind.conf.d/90-arktube.conf ]; then
-    sudo rm -f /etc/systemd/logind.conf.d/90-arktube.conf
-    sudo systemctl restart systemd-logind
-else
-    echo "    already gone — nothing to remove"
-fi
+# Power-key handling is no longer a systemd-logind config change to
+# undo here: install.sh now hands that key to overlay.py via a
+# `systemd-inhibit --what=handle-power-key` runtime lock (see
+# 20-arktube.conf), which is scoped to overlay.py's own process and
+# releases itself the moment that process exits — nothing under
+# /etc/systemd was ever written for it, so there's nothing to restore.
+
 # The video-group membership install.sh grants for brightnessctl is
 # deliberately left alone here, same reasoning as leaving the pip
 # packages below: it's a general account permission (any other
