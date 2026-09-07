@@ -47,8 +47,10 @@ each one an actual backend.
 """
 
 import os
+import logging
 import signal
 import subprocess
+import sys
 from pathlib import Path
 
 import webview
@@ -61,6 +63,27 @@ from gi.repository import GLib, Gtk, GtkLayerShell  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
+
+# ---------------------------------------------------------------------------
+# Logging. Sway launches this file via `exec` (see 20-arktube.conf), which
+# does not give you a terminal to see stdout/stderr on -- a startup crash
+# here previously just vanished, with no clue left behind that overlay.py
+# never even got as far as creating a window. Everything of interest now
+# also goes to a real file, and the top-level `try/except` in `__main__`
+# below guarantees a traceback is written even for exceptions no other
+# handler in this file catches.
+# ---------------------------------------------------------------------------
+LOG_PATH = HERE / "overlay.log"
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_PATH),
+        logging.StreamHandler(sys.stderr),
+    ],
+)
+log = logging.getLogger("overlay")
 
 # Window sizes for each panel state. Prior to the remote-input-mapping
 # work (docs/planning/REMOTE-INPUT-MAPPING.md) there were only two:
@@ -160,20 +183,21 @@ def attach_layer_shell(window, *, layer, anchors, exclusive_zone, keyboard_mode)
     def _on_before_show():
         gtk_window = getattr(window, "native", None)
         if gtk_window is None:
-            print(
-                "overlay.py: window.native was unset in before_show; "
-                "cannot initialize gtk-layer-shell. This window will "
-                "fall back to unmanaged placement, which is the Stage 8 "
-                "bug this file exists to fix."
+            log.error(
+                "window.native was unset in before_show; cannot "
+                "initialize gtk-layer-shell. This window will fall back "
+                "to unmanaged placement, which is the Stage 8 bug this "
+                "file exists to fix. (Is pywebview actually running its "
+                "GTK backend? webview.start() must be called with "
+                "gui=\"gtk\".)"
             )
             return
         try:
             _init_layer_shell(gtk_window, config)
-        except Exception as exc:  # noqa: BLE001 - fail loud, not silent; see above
-            print(
-                "overlay.py: gtk-layer-shell init failed "
-                f"({exc!r}). Is gir1.2-gtklayershell-0.1 / "
-                "libgtk-layer-shell0 installed? Falling back to "
+        except Exception:  # noqa: BLE001 - fail loud, not silent; see above
+            log.exception(
+                "gtk-layer-shell init failed. Is gir1.2-gtklayershell-0.1 "
+                "/ libgtk-layer-shell0 installed? Falling back to "
                 "unmanaged placement."
             )
 
@@ -798,4 +822,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    log.info("overlay.py starting (log file: %s)", LOG_PATH)
+    try:
+        main()
+    except Exception:
+        log.exception(
+            "overlay.py crashed during startup -- this is almost "
+            "certainly why the overlay/OSD/menu never appeared. See the "
+            "traceback above/in %s for the real cause.",
+            LOG_PATH,
+        )
+        raise
