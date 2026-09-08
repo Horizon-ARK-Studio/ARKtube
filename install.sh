@@ -158,6 +158,14 @@ fi
 # typelibs land on GI_TYPELIB_PATH/pkg-config's default search paths
 # without this script needing to export anything into Sway's `exec`
 # environment.
+# Resolved once, up front, as an absolute path -- see the loop below for
+# why: passing this exact path to `sudo` (rather than the bare name
+# `meson`) means sudo execs it directly with no PATH lookup of its own,
+# so there's no way for `meson setup` (run as this user) and
+# `sudo meson install` (run as root) to silently resolve to two
+# different installed copies of meson.
+MESON_BIN="$(command -v meson)"
+
 for astal_lib in lib/astal/io lib/astal/gtk3 lib/wireplumber lib/network lib/battery; do
     echo "    -- ${astal_lib}"
     build_dir="${ASTAL_SRC}/${astal_lib}/build"
@@ -170,8 +178,23 @@ for astal_lib in lib/astal/io lib/astal/gtk3 lib/wireplumber lib/network lib/bat
     # simple, always valid, and matches the "just rebuild it" posture
     # this script already uses for osd.c/power-menu.c below.
     rm -rf "${build_dir}"
-    meson setup --prefix /usr "${build_dir}" "${ASTAL_SRC}/${astal_lib}"
-    sudo meson install -C "${build_dir}"
+    "${MESON_BIN}" setup --prefix /usr "${build_dir}" "${ASTAL_SRC}/${astal_lib}"
+    # `sudo "${MESON_BIN}"`, not a bare `sudo meson` -- a bare `sudo
+    # meson install` lets sudo's own PATH handling decide which
+    # installed `meson` to run, and on a system with more than one (e.g.
+    # an apt-packaged meson plus a newer pip/pipx one) it can silently
+    # pick a *different* one than the `meson setup` line right above
+    # just used. meson install then reads a build.dat written by one
+    # meson version using a different one and fails with "Build data
+    # file ... references functions or classes that don't exist ...
+    # generated with an old version of meson." An explicit `env
+    # "PATH=$PATH"` was tried here first and didn't reliably fix it --
+    # sudo configurations that set `secure_path` override PATH for the
+    # exec'd command regardless of what the caller passes. Handing sudo
+    # the resolved absolute path instead sidesteps PATH lookup (and
+    # secure_path) entirely: there's only one file `sudo` can possibly
+    # run.
+    sudo "${MESON_BIN}" install -C "${build_dir}"
 done
 sudo ldconfig
 # lib/astal/gtk3 is what provides the `Astal` (3.0) GI namespace
