@@ -1,2 +1,3 @@
 *.patch
 src/overlay/osd/osd
+src/overlay/power-menu/power-menu

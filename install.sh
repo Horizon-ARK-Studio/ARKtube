@@ -138,6 +138,21 @@ install -Dm755 "${OVERLAY}/osd/osd-notify.sh" "${HOME}/.local/share/arktube-over
 # repo tree too, gitignored, purely so a re-run doesn't need network
 # access to rebuild if apt's cache is already warm.
 
+echo "==> Building and deploying the standalone power menu"
+gcc -O2 -Wall \
+    "$(pkg-config --cflags gtk-layer-shell-0 gtk+-3.0)" \
+    -o "${HERE}/src/overlay/power-menu/power-menu" \
+    "${OVERLAY}/power-menu/power-menu.c" \
+    "$(pkg-config --libs gtk-layer-shell-0 gtk+-3.0)"
+install -Dm755 "${OVERLAY}/power-menu/power-menu" "${HOME}/.local/share/arktube-overlay/power-menu"
+# Same build-and-deploy-every-run pattern as the OSD immediately above,
+# and same reason to be a separate binary from it (see power-menu.c's
+# own top comment) rather than folded into osd.c: the OSD is a
+# fire-and-forget toast with no user choice in it, this is a menu with
+# real, destructive actions behind it -- keeping them as two small,
+# independently-reasoned-about programs beats one bigger one where a
+# mistake in the toast's code shares a process with the poweroff button.
+
 cat <<'EOF'
 
 ==> Done.
