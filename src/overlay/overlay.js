@@ -1,30 +1,53 @@
 #!/usr/bin/env -S gjs -m
 //
-// overlay.js — GJS replacement for overlay.py.
+// overlay.js — Astal-based replacement for the hand-rolled GTK3 +
+// gtk-layer-shell + shelled-out-nmcli/wpctl/upower version of this file.
 //
-// Same architecture as before: a GTK3 window promoted to a
-// wlr-layer-shell-v1 surface via gtk-layer-shell, hosting a WebKit2
-// WebView that loads static/index.html/style.css/app.js unmodified.
-// What changed is the host language and runtime -- overlay.py's own
-// PyGObject + pywebview stack turned out to fail in ways that left no
-// trace in any log Sway's `exec` could surface (see this repo's own
-// history for that debugging trail). GJS is used here for the same
-// reason GNOME Shell itself is: it's a first-party binding of exactly
-// the same GTK3/WebKit2/GLib libraries, run directly on the GTK main
-// loop instead of through a second abstraction layer (pywebview) on
-// top of a second language runtime (CPython) on top of PyGObject.
+// The window/WebView/bridge architecture is unchanged: a GTK3 window
+// hosting a WebKit2 WebView that loads static/index.html/style.css/app.js
+// unmodified, talking back to this process over
+// WebKitUserContentManager's script-message channel (static/bridge.js).
+// What changed is everything *around* that WebView:
 //
-// static/bridge.js is the other half of this change -- it replaces
-// pywebview's injected `window.pywebview.api` with a small shim that
-// talks to this file over WebKitUserContentManager's script-message
-// channel instead. static/app.js itself is untouched: it only ever
-// called `window.pywebview.api.*`, never anything pywebview-specific,
-// so nothing on that side needed to change.
+//   * The window is now an `Astal.Window` (from libastal's GTK3 widget
+//     library, GI namespace `Astal` 3.0) instead of a plain `Gtk.Window`
+//     manually promoted to a layer surface with hand-called
+//     `GtkLayerShell.set_anchor/set_layer/set_exclusive_zone/...`.
+//     `Astal.Window` exposes exactly those same wlr-layer-shell-v1
+//     concepts (anchor, layer, exclusivity, keymode) as plain GObject
+//     properties, set at construction and reassignable afterwards --
+//     `updateLayerShell()` below is now a handful of property writes
+//     instead of five separate GtkLayerShell.* calls per edge.
+//   * Volume/mute now comes from `AstalWp` (a wrapper over wireplumber),
+//     not `wpctl`/`pactl` shelled out and text-parsed with a two-way
+//     fallback between the two.
+//   * Network status (and the wifi radio toggle) now comes from
+//     `AstalNetwork`, not `nmcli` invoked and grep/cut-style parsed on a
+//     poll.
+//   * Battery state now comes from `AstalBattery` (a thin wrapper over
+//     upowerd), not `upower -e` / `upower -i` shelled out and parsed
+//     line by line.
 //
-// osd.c and power-menu.c (this directory's siblings) are left exactly
-// as they are -- they're already small, standalone GTK3 +
-// gtk-layer-shell C programs with no Python involved, and were never
-// part of the failure this file exists to fix.
+// What deliberately did NOT move to Astal, because no Astal library
+// covers it:
+//   * Brightness (`brightnessctl`) -- there is no `AstalBacklight`.
+//   * Session lifecycle (`loginctl`, `systemctl`) -- Astal has no
+//     logind/systemd wrapper; these stay exactly as shelled-out calls.
+//   * Actually *connecting* to a WPA-secured wifi network with a
+//     password (`nmcli dev wifi connect <ssid> password <pw>`) --
+//     `AstalNetwork.AccessPoint.activate()` exists, but its documented
+//     behavior ("creates a new SimpleConnection using wpa-psk and
+//     activates it") doesn't describe how a password is supplied, and
+//     guessing at a secrets-handling API is worse than just keeping the
+//     one nmcli call this repo already knew worked. Scanning/reading the
+//     resulting network list DID move to AstalNetwork, since that's pure
+//     state, not a secret.
+// `runCmd()` (Gio.Subprocess-based) survives for exactly those three
+// things, plus the still-necessary network_connect nmcli call.
+//
+// osd.c and power-menu.c (this directory's siblings) are untouched --
+// they're already small, standalone GTK3 + gtk-layer-shell C programs
+// with nothing this refactor concerns itself with.
 
 import GLib from "gi://GLib";
 import Gio from "gi://Gio";
@@ -32,12 +55,11 @@ import Gtk from "gi://Gtk?version=3.0";
 import Gdk from "gi://Gdk?version=3.0";
 
 // ---------------------------------------------------------------------------
-// Paths + logging. Sway launches this via `exec`, which -- same as it did
-// for overlay.py -- gives no terminal to see stdout/stderr on. Everything
-// of interest goes to a real file as well as stderr, and logging is set
-// up before the two riskiest imports below (WebKit2, GtkLayerShell) run,
-// so a missing gir1.2-webkit2-4.1 / gir1.2-gtklayershell-0.1 package logs
-// a specific, readable reason instead of GJS just exiting silently.
+// Paths + logging. Sway launches this via `exec`, which gives no terminal
+// to see stdout/stderr on. Everything of interest goes to a real file as
+// well as stderr, and logging is set up before the risky imports below
+// run, so a missing typelib logs a specific, readable reason instead of
+// GJS just exiting silently.
 // ---------------------------------------------------------------------------
 
 const HERE = Gio.File.new_for_path(
@@ -54,8 +76,7 @@ try {
     null
   );
 } catch (e) {
-  // Falls back to stderr-only below -- matches overlay.py's own
-  // fallback for an unwritable log directory.
+  // Falls back to stderr-only below.
   logStream = null;
 }
 
@@ -79,19 +100,16 @@ logInfo(`logging configured (log file: ${LOG_PATH})`);
 
 // ---------------------------------------------------------------------------
 // PID file -- written here, BEFORE the risky imports below, not at the
-// bottom of the file where it used to live. That ordering was itself a
-// bug: when WebKit2/GtkLayerShell fail to import (missing typelib -- see
-// the try/catches right below), the process throws and exits during
-// module load, which is *before* the old writePidFile() call ever ran.
-// overlay-watchdog.sh then restarts overlay.js in a 1s crash loop
-// forever, and 20-arktube.conf's $mod+m / Menu bindsyms keep signaling
-// whatever PID happened to be left over from the last time overlay.js
-// actually got far enough to write one (stale, and eventually reusable
-// by a completely unrelated process) instead of anything alive. Writing
-// the PID immediately, before anything that can throw, means the file
-// always reflects the current process, crash-looping or not, and
-// overlay-signal.sh (see 20-arktube.conf) can tell a live target from a
-// dead one instead of guessing.
+// bottom of the file. When any of WebKit2/Astal/AstalWp/AstalNetwork/
+// AstalBattery fail to import (missing typelib -- see the try/catches
+// right below), the process throws and exits during module load, which
+// is *before* a later writePidFile() call would ever run.
+// overlay-watchdog.sh then restarts overlay.js in a crash loop, and
+// 20-arktube.conf's $mod+m / Menu bindsyms keep signaling whatever PID
+// happened to be left over from the last time overlay.js actually got
+// far enough to write one, instead of anything alive. Writing the PID
+// immediately, before anything that can throw, means the file always
+// reflects the current process, crash-looping or not.
 // ---------------------------------------------------------------------------
 
 function getPid() {
@@ -125,8 +143,7 @@ function removePidFile(pid) {
       }
     }
   } catch (e) {
-    // Matches overlay.py's own silent pass here -- a missing/unreadable
-    // PID file at shutdown isn't worth failing over.
+    // A missing/unreadable PID file at shutdown isn't worth failing over.
   }
 }
 
@@ -135,11 +152,15 @@ if (earlyPid) writePidFile(earlyPid);
 
 // ---------------------------------------------------------------------------
 // Risky imports, guarded individually and loaded dynamically (rather than
-// as static `import` statements) specifically so a missing typelib logs a
-// clear diagnostic here instead of GJS refusing to even start the module.
+// as static `import` statements) so a missing typelib logs a clear
+// diagnostic here instead of GJS refusing to even start the module.
+//
+// Astal, AstalWp, AstalNetwork, AstalBattery are new in this refactor.
+// WebKit2 is unchanged. GtkLayerShell is GONE -- Astal.Window wraps it
+// internally, so this file no longer talks to gtk-layer-shell directly.
 // ---------------------------------------------------------------------------
 
-let WebKit2, GtkLayerShell;
+let WebKit2, Astal, AstalWp, AstalNetwork, AstalBattery;
 
 try {
   ({ default: WebKit2 } = await import("gi://WebKit2?version=4.1"));
@@ -152,17 +173,46 @@ try {
 }
 
 try {
-  ({ default: GtkLayerShell } = await import("gi://GtkLayerShell?version=0.1"));
+  ({ default: Astal } = await import("gi://Astal?version=3.0"));
 } catch (e) {
   logError(
-    `failed to import GtkLayerShell 0.1 -- this is the single most likely ` +
-      `startup failure. It means gir1.2-gtklayershell-0.1 and/or the ` +
-      `libgtk-layer-shell0 shared library it wraps are missing. Without ` +
-      `this, the corner menu/power panel/network tile/OSD have no process ` +
-      `behind them at all -- volume/brightness still work because those ` +
-      `bypass this file entirely via direct Sway bindsyms. (${e})`
+    `failed to import Astal 3.0 -- this is the single most likely ` +
+      `startup failure now that this file is Astal-based. It means ` +
+      `libastal's GTK3 widget library (and its typelib) isn't built/ ` +
+      `installed. Without this, the corner menu/power panel/network ` +
+      `tile/OSD have no process behind them at all -- volume/brightness ` +
+      `still work because those bypass this file entirely via direct ` +
+      `Sway bindsyms. (${e})`
   );
   throw e;
+}
+
+// AstalWp/AstalNetwork/AstalBattery are each optional in isolation --
+// losing one degrades exactly the feature it backs (volume, network,
+// battery respectively) rather than the whole overlay, so these are
+// logged as warnings, not thrown, and the affected Overlay methods below
+// fall back to "unavailable" results the same way runCmd()'s callers
+// already handle a missing binary.
+
+try {
+  ({ default: AstalWp } = await import("gi://AstalWp?version=0.1"));
+} catch (e) {
+  logWarn(`failed to import AstalWp 0.1 -- volume/mute will report unavailable. (${e})`);
+  AstalWp = null;
+}
+
+try {
+  ({ default: AstalNetwork } = await import("gi://AstalNetwork?version=0.1"));
+} catch (e) {
+  logWarn(`failed to import AstalNetwork 0.1 -- the network tile will report unavailable. (${e})`);
+  AstalNetwork = null;
+}
+
+try {
+  ({ default: AstalBattery } = await import("gi://AstalBattery?version=0.1"));
+} catch (e) {
+  logWarn(`failed to import AstalBattery 0.1 -- battery status will report absent (treated as desktop, not laptop). (${e})`);
+  AstalBattery = null;
 }
 
 logInfo("all imports succeeded, continuing startup");
@@ -174,13 +224,14 @@ Gio._promisify(
 );
 
 // ---------------------------------------------------------------------------
-// Panel geometry -- same four states overlay.py had: the collapsed
-// top-right corner bar ('none'), the full settings panel ('overlay'), the
-// centered power menu ('power'), and the centered volume/brightness toast
-// ('osd'). gtk-layer-shell centers a surface on any axis where neither of
-// that axis's edges is anchored, which is what puts 'power' dead-center
-// and 'osd' horizontally centered near the top without either needing to
-// know the real screen width.
+// Panel geometry -- same four states as before: the collapsed top-right
+// corner bar ('none'), the full settings panel ('overlay'), the centered
+// power menu ('power'), and the centered volume/brightness toast ('osd').
+// `Astal.WindowAnchor` is a flags enum (bitwise-OR combinable, same as
+// GtkLayerShell.Edge was used as an array of edges before); leaving an
+// axis unanchored on both edges is still what centers a surface on that
+// axis, so 'power' still ends up dead-center and 'osd' horizontally
+// centered near the top without either needing the real screen width.
 // ---------------------------------------------------------------------------
 
 const BAR_HEIGHT = 56;
@@ -191,79 +242,65 @@ const OSD_WIDTH = 320;
 const OSD_HEIGHT = 210;
 
 function panelGeometry(name, width) {
+  const { TOP, RIGHT } = Astal.WindowAnchor;
   switch (name) {
     case "overlay":
       return {
         size: [width, PANEL_HEIGHT],
-        anchors: [GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT],
-        // EXCLUSIVE, not ON_DEMAND -- becoming visible doesn't grant a
-        // Wayland surface keyboard focus by itself; something has to
-        // claim it, same as lock()/unlock() below.
-        keyboardMode: GtkLayerShell.KeyboardMode.EXCLUSIVE,
+        anchor: TOP | RIGHT,
+        // EXCLUSIVE, not the default ON_DEMAND -- becoming visible
+        // doesn't grant a Wayland surface keyboard focus by itself;
+        // something has to claim it, same as lock()/unlock() below.
+        keymode: Astal.Keymode.EXCLUSIVE,
       };
     case "power":
       return {
         size: [POWER_MENU_WIDTH, POWER_MENU_HEIGHT],
-        anchors: [],
-        keyboardMode: GtkLayerShell.KeyboardMode.EXCLUSIVE,
+        anchor: 0, // no edges anchored on either axis -> centered
+        keymode: Astal.Keymode.EXCLUSIVE,
       };
     case "osd":
       return {
         size: [OSD_WIDTH, OSD_HEIGHT],
-        anchors: [GtkLayerShell.Edge.TOP],
+        anchor: TOP,
         // No keyboard interaction happens on the toast, so this stays
         // ON_DEMAND rather than stealing focus from ARKtube mid-playback.
-        keyboardMode: GtkLayerShell.KeyboardMode.ON_DEMAND,
+        keymode: Astal.Keymode.ON_DEMAND,
       };
     case "none":
     default:
       return {
         size: [width, BAR_HEIGHT],
-        anchors: [GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT],
-        keyboardMode: GtkLayerShell.KeyboardMode.ON_DEMAND,
+        anchor: TOP | RIGHT,
+        keymode: Astal.Keymode.ON_DEMAND,
       };
   }
 }
 
-function updateLayerShell(gtkWindow, { layer, anchors, exclusiveZone, keyboardMode }) {
-  GtkLayerShell.set_layer(gtkWindow, layer);
-  for (const edge of [
-    GtkLayerShell.Edge.TOP,
-    GtkLayerShell.Edge.BOTTOM,
-    GtkLayerShell.Edge.LEFT,
-    GtkLayerShell.Edge.RIGHT,
-  ]) {
-    GtkLayerShell.set_anchor(gtkWindow, edge, anchors.includes(edge));
-    GtkLayerShell.set_margin(gtkWindow, edge, 0);
-  }
-  GtkLayerShell.set_exclusive_zone(gtkWindow, exclusiveZone);
-  GtkLayerShell.set_keyboard_mode(gtkWindow, keyboardMode);
-}
-
-function initLayerShell(gtkWindow, config) {
-  let supported = null;
-  try {
-    supported = GtkLayerShell.is_supported();
-  } catch (e) {
-    supported = null;
-  }
-  if (supported === false) {
-    logWarn(
-      "GtkLayerShell.is_supported() returned false -- the running " +
-        "Wayland compositor does not advertise wlr-layer-shell-v1. " +
-        "init_for_window() below will likely fail."
-    );
-  }
-  GtkLayerShell.init_for_window(gtkWindow);
-  updateLayerShell(gtkWindow, config);
+// Every panel state here uses IGNORE (never reserve screen space for
+// itself -- ARKtube's WebView underneath should never be pushed around
+// by the corner bar or an open panel). The old code's exclusiveZone was
+// always -1 or 0 for exactly the same reason; neither value ever asked
+// for reserved space, so both collapse onto Astal.Exclusivity.IGNORE.
+function updateLayerShell(astalWindow, { anchor, keymode }) {
+  astalWindow.layer = Astal.Layer.OVERLAY;
+  astalWindow.exclusivity = Astal.Exclusivity.IGNORE;
+  astalWindow.anchor = anchor;
+  astalWindow.keymode = keymode;
+  astalWindow.margin_top = 0;
+  astalWindow.margin_right = 0;
+  astalWindow.margin_bottom = 0;
+  astalWindow.margin_left = 0;
 }
 
 // ---------------------------------------------------------------------------
 // Shell-out helper. Every caller treats `null` as "control unavailable"
-// and degrades the UI rather than throwing -- same contract overlay.py's
-// run() had. Built on Gio.Subprocess (async, non-blocking) rather than a
-// synchronous call, since this runs on the same GTK main loop thread that
-// also has to keep the WebView responsive.
+// and degrades the UI rather than throwing. Still needed for brightness
+// (brightnessctl), session lifecycle (loginctl/systemctl), and the one
+// nmcli connect call -- see this file's header for why those didn't move
+// to Astal. Built on Gio.Subprocess (async, non-blocking) rather than a
+// synchronous call, since this runs on the same GTK main loop thread
+// that also has to keep the WebView responsive.
 // ---------------------------------------------------------------------------
 
 async function runCmd(argv, timeoutSeconds = 3) {
@@ -293,16 +330,25 @@ async function runCmd(argv, timeoutSeconds = 3) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+      resolve();
+      return GLib.SOURCE_REMOVE;
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
-// Overlay state + the same set of operations SystemAPI exposed to app.js,
-// just as plain (mostly async) methods instead of pywebview.api-bound
-// ones. The bridge dispatch table further down is what actually connects
-// these to static/bridge.js's calls.
+// Overlay state + the same set of operations the bridge exposes to
+// app.js, just as plain (mostly async) methods. The bridge dispatch
+// table further down is what actually connects these to
+// static/bridge.js's calls.
 // ---------------------------------------------------------------------------
 
 class Overlay {
   constructor() {
-    this.window = null; // Gtk.Window
+    this.window = null; // Astal.Window (a Gtk.Window subclass)
     this.webView = null; // WebKit2.WebView
     this.width = 1920; // overwritten in main() from the real screen
     this.locked = false;
@@ -322,16 +368,10 @@ class Overlay {
   runJs(script) {
     if (!this.webView) return;
     if (!this.pageReady) {
-      // Previously: a SIGUSR1 (or any bridge call) that landed while
-      // WebKit2 was still loading index.html/app.js just silently lost
-      // its `run_javascript` call -- `window.__cgSetPanel` didn't exist
-      // yet, the guarded `window.__cgSetPanel && ...` call was a no-op,
-      // and nothing was logged. The very first $mod+m press after a
-      // (re)start of overlay.js -- exactly the moment someone testing
-      // the fix is most likely to press it -- was the press most likely
-      // to hit this race. Queueing instead of dropping means it's
-      // delivered as soon as the page actually finishes loading instead
-      // of being lost.
+      // A SIGUSR1 (or any bridge call) that lands while WebKit2 is still
+      // loading index.html/app.js would otherwise silently lose its
+      // `run_javascript` call. Queueing instead of dropping means it's
+      // delivered as soon as the page actually finishes loading.
       this.pendingJs.push(script);
       return;
     }
@@ -352,17 +392,10 @@ class Overlay {
 
   async setPanel(panel) {
     if (this.locked) {
-      // Self-heal against a stuck `this.locked`: this flag is only ever
-      // set/cleared by lock()/unlock() below, both in-memory and both
-      // best-effort. If unlock() never ran to completion for any reason
-      // (a rejected bridge call, an exception between setting
-      // this.locked = false and its own GLib.idle_add body finishing),
-      // every future $mod+m/Menu press hit this branch and returned
-      // "locked" forever -- silently, since nothing here logged it and
-      // the panel/OSD genuinely never appeared again for the rest of
-      // that process's life. Cross-check against the real session lock
-      // state (loginctl) rather than trusting our own flag blindly, and
-      // clear it if they disagree instead of staying wedged.
+      // Self-heal against a stuck `this.locked`: cross-check against the
+      // real session lock state (loginctl) rather than trusting our own
+      // flag blindly, and clear it if they disagree instead of staying
+      // wedged with every future panel request silently no-op'ing.
       const hint = await runCmd(["loginctl", "show-session", "self", "-p", "LockedHint", "--value"]);
       if (hint !== null && hint.trim().toLowerCase() !== "yes") {
         logWarn(
@@ -379,19 +412,10 @@ class Overlay {
     GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
       if (this.window) {
         const [width, height] = geometry.size;
-        updateLayerShell(this.window, {
-          layer: GtkLayerShell.Layer.OVERLAY,
-          anchors: geometry.anchors,
-          exclusiveZone: -1,
-          keyboardMode: geometry.keyboardMode,
-        });
+        updateLayerShell(this.window, geometry);
         this.window.resize(width, height);
         this.runJs(`window.__cgSetPanel && window.__cgSetPanel(${JSON.stringify(panel)})`);
       } else {
-        // Previously silent: a SIGUSR1/SIGUSR2 arriving before
-        // buildWindow() has assigned overlay.window (a narrow but real
-        // startup race) used to just vanish here with nothing to show
-        // for it in the log.
         logWarn(`setPanel(${panel}): this.window is not set yet -- dropping this request.`);
       }
       return GLib.SOURCE_REMOVE;
@@ -402,10 +426,10 @@ class Overlay {
   // ---- status polling -------------------------------------------------------
 
   async getStatus() {
-    const battery = await this.battery();
+    const battery = this.battery();
     return {
-      network: await this.network(),
-      volume: await this.volume(),
+      network: this.network(),
+      volume: this.volume(),
       brightness: await this.brightness(),
       battery,
       is_laptop: battery !== null,
@@ -413,113 +437,48 @@ class Overlay {
     };
   }
 
-  async devices() {
-    const out = (await runCmd(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device", "status"])) || "";
-    return out
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => {
-        const parts = line.split(":");
-        return { device: parts[0], type: parts[1], state: parts[2] };
-      })
-      .filter((d) => d.state !== undefined);
+  // ---- volume (AstalWp) ------------------------------------------------------
+  //
+  // Talks to wireplumber directly through libastal's own binding, rather
+  // than shelling out to `wpctl`/`pactl` and text-parsing the result --
+  // this also removes the old two-way wpctl-then-pactl fallback, since
+  // AstalWp is the one thing being asked, not a command that might not
+  // be on PATH.
+
+  _speaker() {
+    if (!AstalWp) return null;
+    try {
+      return AstalWp.get_default()?.audio?.default_speaker || null;
+    } catch (e) {
+      return null;
+    }
   }
 
-  async wifi() {
-    const out = await runCmd(["nmcli", "-t", "-f", "ACTIVE,SSID", "dev", "wifi"]);
-    if (out === null) return { available: false, connected: false, ssid: null };
-    for (const line of out.split("\n")) {
-      if (!line) continue;
-      const idx = line.indexOf(":");
-      const active = idx === -1 ? line : line.slice(0, idx);
-      const ssid = idx === -1 ? "" : line.slice(idx + 1);
-      if (active === "yes") return { available: true, connected: true, ssid };
-    }
-    return { available: true, connected: false, ssid: null };
-  }
-
-  async connectivityFull() {
-    // Plain cached read, not a fresh probe -- must never block a status
-    // poll waiting on one, same contract as overlay.py's version.
-    const out = await runCmd(["nmcli", "networking", "connectivity"]);
-    return out !== null && out.trim().toLowerCase() === "full";
-  }
-
-  async network(wifi = null) {
-    const devices = await this.devices();
-    const ethernetConnected = devices.some(
-      (d) => d.type === "ethernet" && d.state === "connected"
-    );
-    if (wifi === null) wifi = await this.wifi();
-    const stable = await this.connectivityFull();
-
-    if (ethernetConnected && stable) {
-      return {
-        type: "ethernet",
-        label: "Ethernet",
-        sub: "Connected",
-        connected: true,
-        wifi_radio_on: wifi.available,
-      };
-    }
-    if (ethernetConnected && !stable) {
-      if (wifi.connected) {
-        return {
-          type: "wifi",
-          label: "Wi-Fi",
-          sub: wifi.ssid || "Connected",
-          connected: true,
-          fallback_from_ethernet: true,
-          wifi_radio_on: true,
-        };
-      }
-      return {
-        type: "ethernet",
-        label: "Ethernet",
-        sub: "Unstable",
-        connected: true,
-        unstable: true,
-        wifi_radio_on: wifi.available,
-      };
-    }
-    if (wifi.connected) {
-      return {
-        type: "wifi",
-        label: "Wi-Fi",
-        sub: wifi.ssid || "Connected",
-        connected: true,
-        wifi_radio_on: true,
-      };
-    }
+  volume() {
+    const speaker = this._speaker();
+    if (!speaker) return { level: 0, muted: true, available: false };
     return {
-      type: "none",
-      label: "Network",
-      sub: "Not Connected",
-      connected: false,
-      wifi_radio_on: wifi.available,
+      level: Math.round(speaker.volume * 100),
+      muted: speaker.mute,
+      available: true,
     };
   }
 
-  async volume() {
-    let out = await runCmd(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"]);
-    if (out && out.includes("Volume:")) {
-      const parts = out.split(/\s+/);
-      const level = Math.round(parseFloat(parts[1]) * 100);
-      if (!Number.isNaN(level)) {
-        return { level, muted: out.includes("MUTED"), available: true };
-      }
+  async setVolume(level) {
+    const speaker = this._speaker();
+    if (speaker) {
+      speaker.volume = Math.max(0, Math.min(100, Math.trunc(level))) / 100;
     }
-    out = await runCmd(["pactl", "get-sink-volume", "@DEFAULT_SINK@"]);
-    if (out && out.includes("%")) {
-      const field = out.split("/")[1];
-      const pct = field ? parseInt(field.trim().replace("%", ""), 10) : NaN;
-      if (!Number.isNaN(pct)) {
-        const mutedOut = (await runCmd(["pactl", "get-sink-mute", "@DEFAULT_SINK@"])) || "";
-        return { level: pct, muted: mutedOut.includes("yes"), available: true };
-      }
-    }
-    return { level: 0, muted: true, available: false };
+    return this.volume();
   }
+
+  async toggleMute() {
+    const speaker = this._speaker();
+    if (speaker) speaker.mute = !speaker.mute;
+    return this.volume();
+  }
+
+  // ---- brightness (still shells out -- no AstalBacklight exists) ------------
 
   async brightness() {
     const current = await runCmd(["brightnessctl", "get"]);
@@ -533,103 +492,129 @@ class Overlay {
     return { level: 0, available: false };
   }
 
-  async battery() {
-    const devices = (await runCmd(["upower", "-e"])) || "";
-    const batteryPath = devices.split("\n").find((line) => line.includes("battery"));
-    if (!batteryPath) return null;
-    const out = await runCmd(["upower", "-i", batteryPath]);
-    if (!out) return null;
-    let percent = null;
-    let state = null;
-    for (let line of out.split("\n")) {
-      line = line.trim();
-      if (line.startsWith("percentage:")) {
-        percent = line.split(":")[1].trim().replace("%", "");
-      } else if (line.startsWith("state:")) {
-        state = line.split(":")[1].trim();
-      }
-    }
-    if (percent && /^\d+$/.test(percent)) {
-      return { percent: parseInt(percent, 10), charging: state === "charging" };
-    }
-    return null;
-  }
-
-  // ---- essentials: sliders --------------------------------------------------
-
-  async setVolume(level) {
-    level = Math.max(0, Math.min(100, Math.trunc(level)));
-    if ((await runCmd(["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", `${level}%`])) === null) {
-      await runCmd(["pactl", "set-sink-volume", "@DEFAULT_SINK@", `${level}%`]);
-    }
-    return this.volume();
-  }
-
-  async toggleMute() {
-    if ((await runCmd(["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])) === null) {
-      await runCmd(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"]);
-    }
-    return this.volume();
-  }
-
   async setBrightness(level) {
     level = Math.max(1, Math.min(100, Math.trunc(level)));
     await runCmd(["brightnessctl", "set", `${level}%`]);
     return this.brightness();
   }
 
-  // ---- essentials: network tile ---------------------------------------------
+  // ---- network (AstalNetwork) -------------------------------------------------
+  //
+  // AstalNetwork's `Internet` enum (CONNECTED / CONNECTING / DISCONNECTED)
+  // is itself derived from NetworkManager's own connectivity checking, so
+  // the old code's manual "ethernet says connected but is it actually
+  // stable" probe (`nmcli networking connectivity`) isn't needed here --
+  // asking `wired.internet`/`wifi.internet` already answers that.
+
+  network() {
+    if (!AstalNetwork) {
+      return { type: "none", label: "Network", sub: "Not Connected", connected: false, wifi_radio_on: false };
+    }
+    const net = AstalNetwork.get_default();
+    const wired = net?.wired;
+    const wifi = net?.wifi;
+    const CONNECTED = AstalNetwork.Internet.CONNECTED;
+    const wifiRadioOn = wifi ? wifi.enabled : false;
+
+    if (wired && wired.internet === CONNECTED) {
+      return {
+        type: "ethernet",
+        label: "Ethernet",
+        sub: "Connected",
+        connected: true,
+        wifi_radio_on: wifiRadioOn,
+      };
+    }
+    if (wifi && wifi.internet === CONNECTED) {
+      return {
+        type: "wifi",
+        label: "Wi-Fi",
+        sub: wifi.ssid || "Connected",
+        connected: true,
+        wifi_radio_on: true,
+      };
+    }
+    return {
+      type: "none",
+      label: "Network",
+      sub: "Not Connected",
+      connected: false,
+      wifi_radio_on: wifiRadioOn,
+    };
+  }
 
   async networkScan() {
-    const out = await runCmd([
-      "nmcli",
-      "-t",
-      "-f",
-      "IN-USE,SSID,SIGNAL,SECURITY",
-      "dev",
-      "wifi",
-      "list",
-    ]);
-    if (out === null) return [];
+    if (!AstalNetwork) return [];
+    const wifi = AstalNetwork.get_default()?.wifi;
+    if (!wifi) return [];
+    try {
+      wifi.scan();
+    } catch (e) {
+      // Scan is fire-and-forget on top of NetworkManager; a failure here
+      // just means we fall back to whatever access_points already holds.
+    }
+    // scan() kicks off an async NetworkManager scan and updates
+    // access_points via a property change signal rather than returning
+    // the fresh list directly -- give it a moment, then read what's
+    // cached, mirroring nmcli's own "list what's currently known"
+    // semantics rather than blocking indefinitely on a scan finishing.
+    await sleep(1500);
+    const active = wifi.active_access_point;
     const best = new Map();
-    for (const line of out.split("\n")) {
-      if (!line) continue;
-      const fields = line.split(":");
-      if (fields.length < 4) continue;
-      const inUse = fields[0];
-      const ssid = fields[1];
-      if (!ssid) continue;
-      let signal = parseInt(fields[2], 10);
-      if (Number.isNaN(signal)) signal = 0;
-      const security = fields.slice(3).join(":");
-      const entry = {
-        ssid,
-        signal,
-        secured: security.trim().length > 0,
-        in_use: inUse.trim() === "*",
-      };
-      const existing = best.get(ssid);
-      if (!existing || signal > existing.signal) best.set(ssid, entry);
+    for (const ap of wifi.access_points || []) {
+      if (!ap.ssid) continue;
+      const existing = best.get(ap.ssid);
+      if (!existing || ap.strength > existing.signal) {
+        best.set(ap.ssid, {
+          ssid: ap.ssid,
+          signal: ap.strength,
+          secured: Boolean(ap.wpa_flags || ap.rsn_flags),
+          in_use: active ? active.ssid === ap.ssid : false,
+        });
+      }
     }
     return [...best.values()].sort((a, b) => b.signal - a.signal);
   }
 
   async networkToggleWifiRadio() {
-    const wifi = await this.wifi();
-    const current = await this.network(wifi);
-    const turningOn = !wifi.available || !current.wifi_radio_on;
-    await runCmd(["nmcli", "radio", "wifi", turningOn ? "on" : "off"]);
+    if (!AstalNetwork) return this.network();
+    const wifi = AstalNetwork.get_default()?.wifi;
+    if (wifi) wifi.enabled = !wifi.enabled;
     return this.network();
   }
 
+  // Deliberately still nmcli, not AstalNetwork.AccessPoint.activate() --
+  // see this file's header comment for why: connecting with a *password*
+  // isn't something the Astal API documents clearly enough to trust.
   async networkConnect(ssid, password = "") {
     const cmd = ["nmcli", "dev", "wifi", "connect", ssid];
     if (password) cmd.push("password", password);
     const out = await runCmd(cmd, 20);
-    return { success: out !== null, network: await this.network() };
+    return { success: out !== null, network: this.network() };
   }
 
-  // ---- session lifecycle -----------------------------------------------------
+  // ---- battery (AstalBattery) -------------------------------------------------
+
+  battery() {
+    if (!AstalBattery) return null;
+    let device;
+    try {
+      device = AstalBattery.get_default();
+    } catch (e) {
+      return null;
+    }
+    if (!device || !device.is_present) return null;
+    // UPower (and therefore AstalBattery, a thin wrapper over upowerd)
+    // reports `percentage` already on a 0-100 scale, not 0-1.
+    const state = device.state;
+    const CHARGING = AstalBattery.State?.CHARGING;
+    return {
+      percent: Math.round(device.percentage),
+      charging: CHARGING !== undefined ? state === CHARGING : false,
+    };
+  }
+
+  // ---- session lifecycle (still shells out -- no Astal logind wrapper) ------
 
   lock() {
     runCmd(["loginctl", "lock-session"]);
@@ -637,15 +622,12 @@ class Overlay {
     GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
       if (this.window) {
         updateLayerShell(this.window, {
-          layer: GtkLayerShell.Layer.OVERLAY,
-          anchors: [
-            GtkLayerShell.Edge.TOP,
-            GtkLayerShell.Edge.BOTTOM,
-            GtkLayerShell.Edge.LEFT,
-            GtkLayerShell.Edge.RIGHT,
-          ],
-          exclusiveZone: 0,
-          keyboardMode: GtkLayerShell.KeyboardMode.EXCLUSIVE,
+          anchor:
+            Astal.WindowAnchor.TOP |
+            Astal.WindowAnchor.BOTTOM |
+            Astal.WindowAnchor.LEFT |
+            Astal.WindowAnchor.RIGHT,
+          keymode: Astal.Keymode.EXCLUSIVE,
         });
         this.runJs("window.__cgSetLocked && window.__cgSetLocked(true)");
       }
@@ -660,10 +642,8 @@ class Overlay {
     GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
       if (this.window) {
         updateLayerShell(this.window, {
-          layer: GtkLayerShell.Layer.OVERLAY,
-          anchors: [GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT],
-          exclusiveZone: -1,
-          keyboardMode: GtkLayerShell.KeyboardMode.ON_DEMAND,
+          anchor: Astal.WindowAnchor.TOP | Astal.WindowAnchor.RIGHT,
+          keymode: Astal.Keymode.ON_DEMAND,
         });
         this.window.resize(this.width, BAR_HEIGHT);
         this.runJs("window.__cgSetLocked && window.__cgSetLocked(false)");
@@ -703,6 +683,9 @@ const overlay = new Overlay();
 // Bridge dispatch -- the other half of static/bridge.js. Every method name
 // app.js's callApi() ever sends (see that file's own method list) must
 // have an entry here, matched 1:1 with static/bridge.js's METHODS array.
+// Unchanged by this refactor: static/bridge.js and static/app.js don't
+// know or care whether volume/network/battery come from wpctl/nmcli/
+// upower or from Astal -- that's exactly the point of the bridge.
 // ---------------------------------------------------------------------------
 
 const DISPATCH = {
@@ -757,12 +740,8 @@ function setupBridge(contentManager) {
 
 // ---------------------------------------------------------------------------
 // Window / WebView construction + PID file (so 20-arktube.conf's Menu/
-// Power bindsyms can `kill -SIGUSR1/-SIGUSR2` this exact process, same as
-// they did for overlay.py).
+// Power bindsyms can `kill -SIGUSR1/-SIGUSR2` this exact process).
 // ---------------------------------------------------------------------------
-
-// getPid()/writePidFile()/removePidFile() moved up to just before the
-// risky WebKit2/GtkLayerShell imports -- see the comment there for why.
 
 function screenWidth(defaultWidth = 1920) {
   try {
@@ -774,14 +753,27 @@ function screenWidth(defaultWidth = 1920) {
   }
 }
 
+// Builds the collapsed top-right corner bar's Astal.Window directly --
+// unlike the old code, there's no separate "build a plain Gtk.Window,
+// then call GtkLayerShell.init_for_window() on it before showing" step.
+// Astal.Window IS the layer surface; its anchor/layer/exclusivity/
+// keymode properties are set at construction time below, the same
+// values panelGeometry("none", ...) would return.
 function buildWindow() {
-  const win = new Gtk.Window({ type: Gtk.WindowType.TOPLEVEL, decorated: false });
-  win.set_default_size(overlay.width, BAR_HEIGHT);
+  const win = new Astal.Window({
+    namespace: "arktube-overlay",
+    layer: Astal.Layer.OVERLAY,
+    anchor: Astal.WindowAnchor.TOP | Astal.WindowAnchor.RIGHT,
+    exclusivity: Astal.Exclusivity.IGNORE,
+    keymode: Astal.Keymode.ON_DEMAND,
+    decorated: false,
+    default_width: overlay.width,
+    default_height: BAR_HEIGHT,
+  });
   win.set_app_paintable(true);
 
   // Transparent background so the OSD/power panels render as floating
-  // cards, not opaque rectangles -- matches overlay.py's
-  // transparent=True/frameless=True.
+  // cards, not opaque rectangles.
   const screen = win.get_screen();
   const visual = screen && screen.get_rgba_visual();
   if (visual) win.set_visual(visual);
@@ -815,43 +807,30 @@ function buildWindow() {
 
 function main() {
   overlay.width = screenWidth();
-  const win = buildWindow();
 
-  // gtk-layer-shell's contract is that init_for_window() runs before the
-  // window is shown -- unlike overlay.py, which had to hook pywebview's
-  // before_show event to find that moment, this file builds its own
-  // Gtk.Window directly, so it's simplest to just call this right here,
-  // before show_all() below.
-  //
-  // Wrapped in try/catch, unlike the rest of this function: if the
-  // compositor doesn't actually advertise wlr-layer-shell-v1 (see
-  // initLayerShell()'s own is_supported() warning above),
-  // init_for_window() throws, and that used to propagate all the way up
-  // through main()'s own try/catch and kill the process *before* the
-  // SIGUSR1/SIGUSR2 handlers below were ever registered -- meaning
-  // $mod+m/Menu/Power-panel had no handler to reach even once
-  // overlay-watchdog.sh restarted it, over and over. Falling back to a
-  // plain (non-layer-shell) toplevel here is degraded -- no anchoring,
-  // no keyboard-mode control, it'll behave like an ordinary window -- but
-  // it keeps the process, and the signal handlers below, alive instead
-  // of crash-looping forever on an environment issue that a restart
+  // Wrapped in try/catch: if the compositor doesn't actually advertise
+  // wlr-layer-shell-v1, Astal.Window's construction (or realization) can
+  // throw the same way GtkLayerShell.init_for_window() used to. Falling
+  // back to a plain Gtk.Window here is degraded -- no anchoring, no
+  // keyboard-mode control, it'll behave like an ordinary window -- but
+  // it keeps the process, and the SIGUSR1/SIGUSR2 handlers below, alive
+  // instead of crash-looping forever on an environment issue a restart
   // can't fix anyway.
+  let win;
   try {
-    initLayerShell(win, {
-      layer: GtkLayerShell.Layer.OVERLAY,
-      anchors: [GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT],
-      exclusiveZone: -1,
-      keyboardMode: GtkLayerShell.KeyboardMode.ON_DEMAND,
-    });
+    win = buildWindow();
   } catch (e) {
     logError(
-      `GtkLayerShell.init_for_window() failed -- continuing with a plain ` +
+      `Astal.Window construction failed -- continuing with a plain ` +
         `(non-layer-shell) window instead of crashing, so the overlay ` +
         `process and its SIGUSR1/SIGUSR2 handlers stay alive. The panel ` +
         `will not be anchored/positioned correctly until this is fixed ` +
         `(is the compositor actually Sway/wlroots, and does it support ` +
         `wlr-layer-shell-v1?). (${e})`
     );
+    win = new Gtk.Window({ type: Gtk.WindowType.TOPLEVEL, decorated: false });
+    win.set_default_size(overlay.width, BAR_HEIGHT);
+    overlay.window = win;
   }
 
   win.connect("destroy", () => Gtk.main_quit());
@@ -859,9 +838,7 @@ function main() {
 
   // Menu/Power remote buttons -> Sway bindsyms send SIGUSR1/SIGUSR2 to
   // this exact PID (read from overlay.pid -- see 20-arktube.conf).
-  // GLib.unix_signal_add dispatches directly on the GTK main loop, no
-  // extra marshalling needed the way Python's `signal` module required.
-  // 10 and 12 are the standard Linux signal numbers for SIGUSR1/SIGUSR2.
+  // GLib.unix_signal_add dispatches directly on the GTK main loop.
   const SIGUSR1 = 10;
   const SIGUSR2 = 12;
   GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, SIGUSR1, () => {

@@ -32,22 +32,36 @@ echo "==> Installing Sway and the overlay's runtime dependencies"
 sudo apt-get update
 sudo apt-get install -y \
     sway \
-    gjs gir1.2-webkit2-4.1 gir1.2-gtklayershell-0.1 \
+    gjs gir1.2-webkit2-4.1 \
     network-manager wireplumber pulseaudio-utils brightnessctl upower \
-    build-essential pkg-config libgtk-3-dev libgtk-layer-shell-dev
+    build-essential pkg-config meson ninja-build valac git \
+    libgtk-3-dev libgtk-layer-shell-dev \
+    libwireplumber-0.4-dev libnm-dev libupower-glib-dev \
+    gobject-introspection libgirepository1.0-dev
 # python3-pip/python3-gi are gone from this list: the overlay itself
-# (overlay.js) is now GJS, not Python -- see src/overlay/overlay.js's own
-# header for why. `gjs` replaces them, and pulls in the same GTK3
-# typelib GObject-introspection needs anyway. gir1.2-webkit2-4.1 and
-# gir1.2-gtklayershell-0.1 are unchanged: overlay.js uses the exact same
-# WebKit2/gtk-layer-shell libraries overlay.py did, just from GJS instead
-# of PyGObject.
-# The build-essential/pkg-config/libgtk-3-dev/libgtk-layer-shell-dev line
-# is unchanged: build-time-only deps for src/overlay/osd/osd.c and
+# (overlay.js) is GJS, not Python. gir1.2-webkit2-4.1 is unchanged:
+# overlay.js still hosts its WebView through the exact same WebKit2
+# library.
+# gir1.2-gtklayershell-0.1 is GONE from this list -- overlay.js no
+# longer talks to gtk-layer-shell directly (see its own header comment
+# for the Astal.Window refactor). libgtk-layer-shell-dev stays, though:
+# Astal's own GTK3 widget library links against it internally, so it's
+# still needed at *build* time for the "Building Astal" step below (and
+# libgtk-layer-shell0, already pulled in transitively, is still needed
+# at runtime for the same reason).
+# meson/ninja-build/valac/git are new: Astal isn't packaged for Ubuntu
+# (no apt package exists for it, unlike gtk-layer-shell), so its GTK3
+# widget library and the AstalWp/AstalNetwork/AstalBattery bindings are
+# built from source below, the same way osd.c/power-menu.c already are
+# -- just with meson/vala instead of a raw gcc invocation.
+# libwireplumber-0.4-dev/libnm-dev/libupower-glib-dev/
+# libgirepository1.0-dev are the -dev packages Astal's wireplumber/
+# network/battery libraries themselves need at build time to generate
+# their typelibs; wireplumber/network-manager/upower (already listed
+# above) remain the actual runtime daemons those libraries talk to.
+# The build-essential/pkg-config/libgtk-3-dev line is unchanged from
+# before: build-time-only deps for src/overlay/osd/osd.c and
 # src/overlay/power-menu/power-menu.c, neither of which changed here.
-# The resulting binaries link against libgtk-3-0/libgtk-layer-shell0
-# (already pulled in transitively above) and need none of these -dev
-# packages at runtime.
 # No seatd here: Ubuntu ships systemd-logind, and Sway uses logind as its
 # seat backend automatically when one is present — seatd is only needed
 # on non-systemd or non-logind setups, neither of which is Ubuntu/GDM.
@@ -121,6 +135,52 @@ systemctl --user daemon-reload 2>/dev/null || true
 # finishes is enough, no reboot required.
 echo "==> Adding $(whoami) to the video group, for brightnessctl"
 sudo usermod -aG video "$(whoami)"
+
+echo "==> Building and installing Astal (not packaged for Ubuntu)"
+ASTAL_SRC="${HERE}/build/astal"
+if [ ! -d "${ASTAL_SRC}" ]; then
+    git clone --depth 1 https://github.com/aylur/astal.git "${ASTAL_SRC}"
+fi
+# Only astal-io (a required dependency of the other four) plus the four
+# libraries overlay.js actually imports -- see that file's own header
+# comment. Each is meson setup/install'd independently, in dependency
+# order (io first; gtk3/wireplumber/network/battery all link against it
+# via pkg-config, so it has to be installed before them, not just built).
+#
+# astal's repo lays these out inconsistently: the GTK3/GTK4 widget
+# libraries and astal-io live under lib/astal/<name>, while the feature
+# libraries (wireplumber, network, battery, tray, ...) sit directly
+# under lib/<name> -- lib/gtk3 (no "astal/") does NOT exist, and using
+# it here is exactly what produces meson's "neither source directory
+# ... nor build directory ... exist" error.
+#
+# Installing to /usr (not meson's default /usr/local) so the resulting
+# typelibs land on GI_TYPELIB_PATH/pkg-config's default search paths
+# without this script needing to export anything into Sway's `exec`
+# environment.
+for astal_lib in lib/astal/io lib/astal/gtk3 lib/wireplumber lib/network lib/battery; do
+    echo "    -- ${astal_lib}"
+    build_dir="${ASTAL_SRC}/${astal_lib}/build"
+    # Wiped rather than passed --reconfigure: --reconfigure asks meson to
+    # regenerate an *existing* configured build directory, and errors
+    # out (with the exact "neither source directory ... nor build
+    # directory ... exist" message this fix is for) the first time
+    # there's nothing there yet to reconfigure. Wiping first keeps
+    # `meson setup` a plain first-time setup on every run, which is
+    # simple, always valid, and matches the "just rebuild it" posture
+    # this script already uses for osd.c/power-menu.c below.
+    rm -rf "${build_dir}"
+    meson setup --prefix /usr "${build_dir}" "${ASTAL_SRC}/${astal_lib}"
+    sudo meson install -C "${build_dir}"
+done
+sudo ldconfig
+# lib/astal/gtk3 is what provides the `Astal` (3.0) GI namespace
+# overlay.js constructs its window from. lib/astal/io provides the
+# separate `AstalIO` namespace that the other four link against
+# internally -- overlay.js itself never imports AstalIO directly, so it
+# isn't in that file's own import list, but it still has to be built
+# and installed here for the others' meson setup to find it via
+# pkg-config.
 
 echo "==> Deploying the system overlay"
 mkdir -p "${HOME}/.local/share/arktube-overlay/static"
