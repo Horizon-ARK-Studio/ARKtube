@@ -79,6 +79,24 @@ STATIC = HERE / "static"
 # ---------------------------------------------------------------------------
 LOG_PATH = HERE / "overlay.log"
 
+# ---------------------------------------------------------------------------
+# PID file, so 20-arktube.conf's bindsyms can signal *this exact process*
+# instead of `pkill -f overlay.py`. That pattern-match was a real bug: this
+# file is always launched as `systemd-inhibit ... python3 overlay.py` (see
+# the exec line below), and systemd-inhibit's own command line therefore
+# also contains the substring "overlay.py" -- `pkill -f overlay.py` matched
+# BOTH the intended python3 process (which has a real SIGUSR1/SIGUSR2
+# handler, see main()) AND the systemd-inhibit wrapper around it, which has
+# no handler for either signal. POSIX's default disposition for an
+# unhandled SIGUSR1/SIGUSR2 is to terminate the process, so every Menu/
+# `$mod+s`/Power press was silently killing the systemd-inhibit wrapper and
+# dropping its `handle-power-key` inhibitor lock -- with nothing logged
+# anywhere, since overlay.py's own log only sees its own side, which looked
+# completely fine. The next physical Power press then reached logind's
+# default handler unopposed and shut the machine down for real.
+# ---------------------------------------------------------------------------
+PID_PATH = HERE / "overlay.pid"
+
 try:
     logging.basicConfig(
         level=logging.DEBUG,
@@ -939,8 +957,33 @@ def main():
     webview.start(gui="gtk")
 
 
+def _write_pid_file():
+    try:
+        PID_PATH.write_text(str(os.getpid()))
+    except OSError:
+        log.exception(
+            "overlay.py: failed to write PID file (%s) -- "
+            "20-arktube.conf's bindsyms won't be able to signal this "
+            "process by PID and will have nothing to fall back to.",
+            PID_PATH,
+        )
+
+
+def _remove_pid_file():
+    try:
+        # Only remove it if it's still ours -- guards against a second
+        # instance's cleanup deleting a newer, still-running instance's
+        # file if two ever raced (exec/exec_always misconfiguration,
+        # manual double-launch from a terminal, etc).
+        if PID_PATH.read_text().strip() == str(os.getpid()):
+            PID_PATH.unlink()
+    except (OSError, ValueError):
+        pass
+
+
 if __name__ == "__main__":
     log.info("overlay.py starting (log file: %s)", LOG_PATH)
+    _write_pid_file()
     try:
         main()
     except Exception:
@@ -951,3 +994,5 @@ if __name__ == "__main__":
             LOG_PATH,
         )
         raise
+    finally:
+        _remove_pid_file()
