@@ -32,16 +32,22 @@ echo "==> Installing Sway and the overlay's runtime dependencies"
 sudo apt-get update
 sudo apt-get install -y \
     sway \
-    python3-pip python3-gi gir1.2-webkit2-4.1 gir1.2-gtklayershell-0.1 \
+    gjs gir1.2-webkit2-4.1 gir1.2-gtklayershell-0.1 \
     network-manager wireplumber pulseaudio-utils brightnessctl upower \
     build-essential pkg-config libgtk-3-dev libgtk-layer-shell-dev
-# The last line is new: build-time-only deps for src/overlay/osd/osd.c,
-# the standalone volume/brightness OSD toast (see that file's own
-# comment for why it's a separate process from overlay.py at all). Only
-# needed here to compile it below -- the resulting binary links against
-# libgtk-3-0/libgtk-layer-shell0 (already pulled in transitively above
-# for the Python overlay) and needs none of these -dev packages at
-# runtime.
+# python3-pip/python3-gi are gone from this list: the overlay itself
+# (overlay.js) is now GJS, not Python -- see src/overlay/overlay.js's own
+# header for why. `gjs` replaces them, and pulls in the same GTK3
+# typelib GObject-introspection needs anyway. gir1.2-webkit2-4.1 and
+# gir1.2-gtklayershell-0.1 are unchanged: overlay.js uses the exact same
+# WebKit2/gtk-layer-shell libraries overlay.py did, just from GJS instead
+# of PyGObject.
+# The build-essential/pkg-config/libgtk-3-dev/libgtk-layer-shell-dev line
+# is unchanged: build-time-only deps for src/overlay/osd/osd.c and
+# src/overlay/power-menu/power-menu.c, neither of which changed here.
+# The resulting binaries link against libgtk-3-0/libgtk-layer-shell0
+# (already pulled in transitively above) and need none of these -dev
+# packages at runtime.
 # No seatd here: Ubuntu ships systemd-logind, and Sway uses logind as its
 # seat backend automatically when one is present — seatd is only needed
 # on non-systemd or non-logind setups, neither of which is Ubuntu/GDM.
@@ -118,11 +124,15 @@ sudo usermod -aG video "$(whoami)"
 
 echo "==> Deploying the system overlay"
 mkdir -p "${HOME}/.local/share/arktube-overlay/static"
-install -Dm755 "${OVERLAY}/overlay.py" "${HOME}/.local/share/arktube-overlay/overlay.py"
+install -Dm755 "${OVERLAY}/overlay.js" "${HOME}/.local/share/arktube-overlay/overlay.js"
 install -Dm644 "${OVERLAY}/static/index.html" "${HOME}/.local/share/arktube-overlay/static/index.html"
 install -Dm644 "${OVERLAY}/static/style.css" "${HOME}/.local/share/arktube-overlay/static/style.css"
+install -Dm644 "${OVERLAY}/static/bridge.js" "${HOME}/.local/share/arktube-overlay/static/bridge.js"
 install -Dm644 "${OVERLAY}/static/app.js" "${HOME}/.local/share/arktube-overlay/static/app.js"
-pip install --user --break-system-packages -r "${OVERLAY}/requirements.txt"
+# No `pip install` here any more -- overlay.js is GJS, not Python, so
+# there are no pip-managed dependencies left to install (`gjs` itself
+# came from apt, above).
+
 
 echo "==> Building and deploying the standalone volume/brightness OSD"
 gcc -O2 -Wall \

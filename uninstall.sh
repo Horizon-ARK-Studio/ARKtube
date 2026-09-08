@@ -32,7 +32,7 @@ Removes the gear-menu entry, ARKtube's Sway config fragments, the
 sway-session.target user unit, and the deployed overlay.
 
   --purge-packages   Also `apt-get remove` the packages install.sh
-                      installed (sway, python3-gi, gir1.2-webkit2-4.1,
+                      installed (sway, gjs, gir1.2-webkit2-4.1,
                       gir1.2-gtklayershell-0.1, network-manager,
                       wireplumber, pulseaudio-utils, brightnessctl,
                       upower). Off by default since these are shared
@@ -107,32 +107,24 @@ fi
 # not something ARKtube-specific to claw back on uninstall.
 
 echo "==> Removing the deployed overlay"
-if pgrep -f "$HOME/.local/share/arktube-overlay/overlay.py" >/dev/null 2>&1; then
-    pkill -f "$HOME/.local/share/arktube-overlay/overlay.py" || true
+if pgrep -f "$HOME/.local/share/arktube-overlay/overlay.js" >/dev/null 2>&1; then
+    pkill -f "$HOME/.local/share/arktube-overlay/overlay.js" || true
 fi
 if [ -d "${HOME}/.local/share/arktube-overlay" ]; then
     rm -rf "${HOME}/.local/share/arktube-overlay"
 else
     echo "    already gone — nothing to remove"
 fi
-# The overlay's pip-installed Python dependencies (requirements.txt --
-# pywebview, PyGObject, etc.) are deliberately left alone: pip has no
-# reliable notion of "everything a --user install pulled in and
-# nothing else still needs," and these are common enough packages
-# (PyGObject in particular) that another --user tool on the same
-# account may already depend on them independently of ARKtube.
+# No pip-installed dependencies to leave alone any more -- overlay.js is
+# GJS, not Python, and `gjs` itself is only removed via --purge-packages
+# below, same as every other apt package install.sh pulled in.
 
 if [ "$PURGE_PACKAGES" -eq 1 ]; then
     echo "==> Removing packages installed for ARKtube (--purge-packages)"
     sudo apt-get remove -y \
         sway \
-        python3-gi gir1.2-webkit2-4.1 gir1.2-gtklayershell-0.1 \
+        gjs gir1.2-webkit2-4.1 gir1.2-gtklayershell-0.1 \
         network-manager wireplumber pulseaudio-utils brightnessctl upower
-    # python3-pip is intentionally not removed even with
-    # --purge-packages: it's a general-purpose tool almost certainly
-    # predating this install and likely to be wanted after it too,
-    # unlike the rest of this list which install.sh pulled in
-    # specifically for Sway/the overlay.
 else
     echo "==> Leaving packages installed (sway, network-manager, wireplumber, etc.)"
     echo "    Re-run with --purge-packages to remove them too."

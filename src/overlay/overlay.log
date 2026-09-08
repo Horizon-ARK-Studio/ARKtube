@@ -1,0 +1,2 @@
+2026-09-08T04:37:30.650Z INFO overlay: logging configured (log file: /home/claude/ARKtube/src/overlay/overlay.log)
+2026-09-08T04:37:30.651Z ERROR overlay: failed to import WebKit2 4.1 -- is gir1.2-webkit2-4.1 / libwebkit2gtk-4.1-0 installed? (Error: Requiring WebKit2, version 4.1: Typelib file for namespace 'WebKit2', version '4.1' not found)
