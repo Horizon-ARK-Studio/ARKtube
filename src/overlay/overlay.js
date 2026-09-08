@@ -78,6 +78,62 @@ const logError = (m) => logLine("ERROR", m);
 logInfo(`logging configured (log file: ${LOG_PATH})`);
 
 // ---------------------------------------------------------------------------
+// PID file -- written here, BEFORE the risky imports below, not at the
+// bottom of the file where it used to live. That ordering was itself a
+// bug: when WebKit2/GtkLayerShell fail to import (missing typelib -- see
+// the try/catches right below), the process throws and exits during
+// module load, which is *before* the old writePidFile() call ever ran.
+// overlay-watchdog.sh then restarts overlay.js in a 1s crash loop
+// forever, and 20-arktube.conf's $mod+m / Menu bindsyms keep signaling
+// whatever PID happened to be left over from the last time overlay.js
+// actually got far enough to write one (stale, and eventually reusable
+// by a completely unrelated process) instead of anything alive. Writing
+// the PID immediately, before anything that can throw, means the file
+// always reflects the current process, crash-looping or not, and
+// overlay-signal.sh (see 20-arktube.conf) can tell a live target from a
+// dead one instead of guessing.
+// ---------------------------------------------------------------------------
+
+function getPid() {
+  // /proc/self is a Linux-specific symlink to /proc/<pid> -- fine here
+  // since this whole project only ever targets Ubuntu/Linux.
+  try {
+    return GLib.path_get_basename(GLib.file_read_link("/proc/self"));
+  } catch (e) {
+    return null;
+  }
+}
+
+function writePidFile(pid) {
+  try {
+    GLib.file_set_contents(PID_PATH, String(pid));
+  } catch (e) {
+    logError(
+      `failed to write PID file (${PID_PATH}) -- 20-arktube.conf's ` +
+        `bindsyms won't be able to signal this process. (${e})`
+    );
+  }
+}
+
+function removePidFile(pid) {
+  try {
+    const [ok, contents] = GLib.file_get_contents(PID_PATH);
+    if (ok) {
+      const text = new TextDecoder().decode(contents).trim();
+      if (text === String(pid)) {
+        Gio.File.new_for_path(PID_PATH).delete(null);
+      }
+    }
+  } catch (e) {
+    // Matches overlay.py's own silent pass here -- a missing/unreadable
+    // PID file at shutdown isn't worth failing over.
+  }
+}
+
+const earlyPid = getPid();
+if (earlyPid) writePidFile(earlyPid);
+
+// ---------------------------------------------------------------------------
 // Risky imports, guarded individually and loaded dynamically (rather than
 // as static `import` statements) specifically so a missing typelib logs a
 // clear diagnostic here instead of GJS refusing to even start the module.
@@ -250,25 +306,75 @@ class Overlay {
     this.webView = null; // WebKit2.WebView
     this.width = 1920; // overwritten in main() from the real screen
     this.locked = false;
+    this.pageReady = false; // set once WebKit2 fires LoadEvent.FINISHED
+    this.pendingJs = []; // scripts queued while the page isn't ready yet
+  }
+
+  // Called once from buildWindow() when the WebView finishes loading
+  // index.html. Flushes anything that was queued by runJs() below.
+  onPageReady() {
+    this.pageReady = true;
+    const queued = this.pendingJs;
+    this.pendingJs = [];
+    for (const script of queued) this._execJs(script);
   }
 
   runJs(script) {
     if (!this.webView) return;
+    if (!this.pageReady) {
+      // Previously: a SIGUSR1 (or any bridge call) that landed while
+      // WebKit2 was still loading index.html/app.js just silently lost
+      // its `run_javascript` call -- `window.__cgSetPanel` didn't exist
+      // yet, the guarded `window.__cgSetPanel && ...` call was a no-op,
+      // and nothing was logged. The very first $mod+m press after a
+      // (re)start of overlay.js -- exactly the moment someone testing
+      // the fix is most likely to press it -- was the press most likely
+      // to hit this race. Queueing instead of dropping means it's
+      // delivered as soon as the page actually finishes loading instead
+      // of being lost.
+      this.pendingJs.push(script);
+      return;
+    }
+    this._execJs(script);
+  }
+
+  _execJs(script) {
     this.webView.run_javascript(script, null, (webView, result) => {
       try {
         webView.run_javascript_finish(result);
       } catch (e) {
-        // Page may not have finished loading yet, or the script threw
-        // in JS -- neither is fatal here, same as overlay.py's
-        // evaluate_js() calls, which never checked their result either.
+        logWarn(`runJs: script threw or was rejected: ${e}`);
       }
     });
   }
 
   // ---- panel state --------------------------------------------------------
 
-  setPanel(panel) {
-    if (this.locked) return "locked";
+  async setPanel(panel) {
+    if (this.locked) {
+      // Self-heal against a stuck `this.locked`: this flag is only ever
+      // set/cleared by lock()/unlock() below, both in-memory and both
+      // best-effort. If unlock() never ran to completion for any reason
+      // (a rejected bridge call, an exception between setting
+      // this.locked = false and its own GLib.idle_add body finishing),
+      // every future $mod+m/Menu press hit this branch and returned
+      // "locked" forever -- silently, since nothing here logged it and
+      // the panel/OSD genuinely never appeared again for the rest of
+      // that process's life. Cross-check against the real session lock
+      // state (loginctl) rather than trusting our own flag blindly, and
+      // clear it if they disagree instead of staying wedged.
+      const hint = await runCmd(["loginctl", "show-session", "self", "-p", "LockedHint", "--value"]);
+      if (hint !== null && hint.trim().toLowerCase() !== "yes") {
+        logWarn(
+          "setPanel: this.locked was true but loginctl reports the " +
+            "session is not actually locked -- clearing the stale flag " +
+            "instead of continuing to no-op every panel request."
+        );
+        this.locked = false;
+      } else {
+        return "locked";
+      }
+    }
     const geometry = panelGeometry(panel, this.width);
     GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
       if (this.window) {
@@ -281,6 +387,12 @@ class Overlay {
         });
         this.window.resize(width, height);
         this.runJs(`window.__cgSetPanel && window.__cgSetPanel(${JSON.stringify(panel)})`);
+      } else {
+        // Previously silent: a SIGUSR1/SIGUSR2 arriving before
+        // buildWindow() has assigned overlay.window (a narrow but real
+        // startup race) used to just vanish here with nothing to show
+        // for it in the log.
+        logWarn(`setPanel(${panel}): this.window is not set yet -- dropping this request.`);
       }
       return GLib.SOURCE_REMOVE;
     });
@@ -649,6 +761,9 @@ function setupBridge(contentManager) {
 // they did for overlay.py).
 // ---------------------------------------------------------------------------
 
+// getPid()/writePidFile()/removePidFile() moved up to just before the
+// risky WebKit2/GtkLayerShell imports -- see the comment there for why.
+
 function screenWidth(defaultWidth = 1920) {
   try {
     const display = Gdk.Display.get_default();
@@ -677,6 +792,16 @@ function buildWindow() {
   const webView = new WebKit2.WebView({ user_content_manager: contentManager });
   webView.set_background_color(new Gdk.RGBA({ red: 0, green: 0, blue: 0, alpha: 0 }));
 
+  // Flush any runJs() calls (e.g. from a SIGUSR1 that arrived while the
+  // page was still loading) once index.html/app.js has actually
+  // finished loading -- see Overlay.runJs()'s own comment for the race
+  // this closes.
+  webView.connect("load-changed", (_wv, loadEvent) => {
+    if (loadEvent === WebKit2.LoadEvent.FINISHED) {
+      overlay.onPageReady();
+    }
+  });
+
   win.add(webView);
 
   overlay.window = win;
@@ -688,42 +813,6 @@ function buildWindow() {
   return win;
 }
 
-function getPid() {
-  // /proc/self is a Linux-specific symlink to /proc/<pid> -- fine here
-  // since this whole project only ever targets Ubuntu/Linux.
-  try {
-    return GLib.path_get_basename(GLib.file_read_link("/proc/self"));
-  } catch (e) {
-    return null;
-  }
-}
-
-function writePidFile(pid) {
-  try {
-    GLib.file_set_contents(PID_PATH, String(pid));
-  } catch (e) {
-    logError(
-      `failed to write PID file (${PID_PATH}) -- 20-arktube.conf's ` +
-        `bindsyms won't be able to signal this process. (${e})`
-    );
-  }
-}
-
-function removePidFile(pid) {
-  try {
-    const [ok, contents] = GLib.file_get_contents(PID_PATH);
-    if (ok) {
-      const text = new TextDecoder().decode(contents).trim();
-      if (text === String(pid)) {
-        Gio.File.new_for_path(PID_PATH).delete(null);
-      }
-    }
-  } catch (e) {
-    // Matches overlay.py's own silent pass here -- a missing/unreadable
-    // PID file at shutdown isn't worth failing over.
-  }
-}
-
 function main() {
   overlay.width = screenWidth();
   const win = buildWindow();
@@ -733,12 +822,37 @@ function main() {
   // before_show event to find that moment, this file builds its own
   // Gtk.Window directly, so it's simplest to just call this right here,
   // before show_all() below.
-  initLayerShell(win, {
-    layer: GtkLayerShell.Layer.OVERLAY,
-    anchors: [GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT],
-    exclusiveZone: -1,
-    keyboardMode: GtkLayerShell.KeyboardMode.ON_DEMAND,
-  });
+  //
+  // Wrapped in try/catch, unlike the rest of this function: if the
+  // compositor doesn't actually advertise wlr-layer-shell-v1 (see
+  // initLayerShell()'s own is_supported() warning above),
+  // init_for_window() throws, and that used to propagate all the way up
+  // through main()'s own try/catch and kill the process *before* the
+  // SIGUSR1/SIGUSR2 handlers below were ever registered -- meaning
+  // $mod+m/Menu/Power-panel had no handler to reach even once
+  // overlay-watchdog.sh restarted it, over and over. Falling back to a
+  // plain (non-layer-shell) toplevel here is degraded -- no anchoring,
+  // no keyboard-mode control, it'll behave like an ordinary window -- but
+  // it keeps the process, and the signal handlers below, alive instead
+  // of crash-looping forever on an environment issue that a restart
+  // can't fix anyway.
+  try {
+    initLayerShell(win, {
+      layer: GtkLayerShell.Layer.OVERLAY,
+      anchors: [GtkLayerShell.Edge.TOP, GtkLayerShell.Edge.RIGHT],
+      exclusiveZone: -1,
+      keyboardMode: GtkLayerShell.KeyboardMode.ON_DEMAND,
+    });
+  } catch (e) {
+    logError(
+      `GtkLayerShell.init_for_window() failed -- continuing with a plain ` +
+        `(non-layer-shell) window instead of crashing, so the overlay ` +
+        `process and its SIGUSR1/SIGUSR2 handlers stay alive. The panel ` +
+        `will not be anchored/positioned correctly until this is fixed ` +
+        `(is the compositor actually Sway/wlroots, and does it support ` +
+        `wlr-layer-shell-v1?). (${e})`
+    );
+  }
 
   win.connect("destroy", () => Gtk.main_quit());
   win.show_all();
@@ -762,9 +876,7 @@ function main() {
   Gtk.main();
 }
 
-logInfo(`overlay.js starting (log file: ${LOG_PATH})`);
-const pid = getPid();
-if (pid) writePidFile(pid);
+logInfo(`overlay.js starting (log file: ${LOG_PATH}, pid: ${earlyPid})`);
 try {
   main();
 } catch (e) {
@@ -774,5 +886,5 @@ try {
   );
   throw e;
 } finally {
-  if (pid) removePidFile(pid);
+  if (earlyPid) removePidFile(earlyPid);
 }

@@ -126,6 +126,10 @@ echo "==> Deploying the system overlay"
 mkdir -p "${HOME}/.local/share/arktube-overlay/static"
 install -Dm755 "${OVERLAY}/overlay.js" "${HOME}/.local/share/arktube-overlay/overlay.js"
 install -Dm755 "${OVERLAY}/overlay-watchdog.sh" "${HOME}/.local/share/arktube-overlay/overlay-watchdog.sh"
+# Used by 20-arktube.conf's Menu/$mod+m bindsyms instead of an inline
+# `kill -SIGUSR1 "$(cat overlay.pid)"` -- see that script's own header
+# for why the validation it does matters.
+install -Dm755 "${OVERLAY}/signal-overlay.sh" "${HOME}/.local/share/arktube-overlay/signal-overlay.sh"
 install -Dm644 "${OVERLAY}/static/index.html" "${HOME}/.local/share/arktube-overlay/static/index.html"
 install -Dm644 "${OVERLAY}/static/style.css" "${HOME}/.local/share/arktube-overlay/static/style.css"
 install -Dm644 "${OVERLAY}/static/bridge.js" "${HOME}/.local/share/arktube-overlay/static/bridge.js"

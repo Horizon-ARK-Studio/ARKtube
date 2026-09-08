@@ -53,6 +53,7 @@ set -uo pipefail
 DIR="$HOME/.local/share/arktube-overlay"
 OVERLAY_JS="$DIR/overlay.js"
 LOG="$DIR/overlay.log"
+PIDFILE="$DIR/overlay.pid"
 
 # A tight crash loop (overlay.js dying in well under a second, e.g. an
 # import that fails immediately) would otherwise spin this script at
@@ -71,6 +72,27 @@ log "starting (supervising ${OVERLAY_JS})"
 while true; do
     gjs -m "$OVERLAY_JS"
     status=$?
+
+    # overlay.js writes/removes $PIDFILE itself (see its writePidFile()/
+    # removePidFile()), but removePidFile() only ever runs from that
+    # script's own `finally` block -- a hard kill (OOM, SIGKILL, a crash
+    # inside a GLib callback that GJS can't unwind through) skips it and
+    # leaves a stale PID on disk pointing at a process that's already
+    # gone. 20-arktube.conf's $mod+m/Menu bindsyms would then either
+    # silently signal nothing, or -- worse, once that PID number gets
+    # reused by some unrelated later process -- signal whatever that is
+    # instead. Belt-and-suspenders cleanup here, after every exit
+    # regardless of how it happened: if the PID on file is not a live
+    # process, remove it, so the next bindsym press finds a clean
+    # "nothing to signal" state rather than a stale one.
+    if [ -f "$PIDFILE" ]; then
+        stale_pid="$(cat "$PIDFILE" 2>/dev/null)"
+        if [ -n "$stale_pid" ] && ! kill -0 "$stale_pid" 2>/dev/null; then
+            rm -f "$PIDFILE"
+            log "removed stale overlay.pid (pid ${stale_pid} is not running) after overlay.js exit"
+        fi
+    fi
+
     log "overlay.js exited (code ${status}) -- restarting in ${BACKOFF_SECONDS}s. The handle-power-key inhibitor stays held throughout this restart (that's this script's whole job) -- see this file's own header comment."
     sleep "$BACKOFF_SECONDS"
 done
