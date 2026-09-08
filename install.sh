@@ -33,7 +33,15 @@ sudo apt-get update
 sudo apt-get install -y \
     sway \
     python3-pip python3-gi gir1.2-webkit2-4.1 gir1.2-gtklayershell-0.1 \
-    network-manager wireplumber pulseaudio-utils brightnessctl upower
+    network-manager wireplumber pulseaudio-utils brightnessctl upower \
+    build-essential pkg-config libgtk-3-dev libgtk-layer-shell-dev
+# The last line is new: build-time-only deps for src/overlay/osd/osd.c,
+# the standalone volume/brightness OSD toast (see that file's own
+# comment for why it's a separate process from overlay.py at all). Only
+# needed here to compile it below -- the resulting binary links against
+# libgtk-3-0/libgtk-layer-shell0 (already pulled in transitively above
+# for the Python overlay) and needs none of these -dev packages at
+# runtime.
 # No seatd here: Ubuntu ships systemd-logind, and Sway uses logind as its
 # seat backend automatically when one is present — seatd is only needed
 # on non-systemd or non-logind setups, neither of which is Ubuntu/GDM.
@@ -115,6 +123,20 @@ install -Dm644 "${OVERLAY}/static/index.html" "${HOME}/.local/share/arktube-over
 install -Dm644 "${OVERLAY}/static/style.css" "${HOME}/.local/share/arktube-overlay/static/style.css"
 install -Dm644 "${OVERLAY}/static/app.js" "${HOME}/.local/share/arktube-overlay/static/app.js"
 pip install --user --break-system-packages -r "${OVERLAY}/requirements.txt"
+
+echo "==> Building and deploying the standalone volume/brightness OSD"
+gcc -O2 -Wall \
+    "$(pkg-config --cflags gtk-layer-shell-0 gtk+-3.0)" \
+    -o "${HERE}/src/overlay/osd/osd" \
+    "${OVERLAY}/osd/osd.c" \
+    "$(pkg-config --libs gtk-layer-shell-0 gtk+-3.0)"
+install -Dm755 "${OVERLAY}/osd/osd" "${HOME}/.local/share/arktube-overlay/osd"
+install -Dm755 "${OVERLAY}/osd/osd-notify.sh" "${HOME}/.local/share/arktube-overlay/osd-notify.sh"
+# Re-running install.sh recompiles and redeploys this each time, same as
+# every other file here -- there's no separate "rebuild the OSD" step to
+# remember. The built binary itself (src/overlay/osd/osd) is left in the
+# repo tree too, gitignored, purely so a re-run doesn't need network
+# access to rebuild if apt's cache is already warm.
 
 cat <<'EOF'
 
