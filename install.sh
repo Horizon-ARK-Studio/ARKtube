@@ -126,10 +126,10 @@ pip install --user --break-system-packages -r "${OVERLAY}/requirements.txt"
 
 echo "==> Building and deploying the standalone volume/brightness OSD"
 gcc -O2 -Wall \
-    "$(pkg-config --cflags gtk-layer-shell-0 gtk+-3.0)" \
+    $(pkg-config --cflags gtk-layer-shell-0 gtk+-3.0) \
     -o "${HERE}/src/overlay/osd/osd" \
     "${OVERLAY}/osd/osd.c" \
-    "$(pkg-config --libs gtk-layer-shell-0 gtk+-3.0)"
+    $(pkg-config --libs gtk-layer-shell-0 gtk+-3.0)
 install -Dm755 "${OVERLAY}/osd/osd" "${HOME}/.local/share/arktube-overlay/osd"
 install -Dm755 "${OVERLAY}/osd/osd-notify.sh" "${HOME}/.local/share/arktube-overlay/osd-notify.sh"
 # Re-running install.sh recompiles and redeploys this each time, same as
@@ -140,10 +140,10 @@ install -Dm755 "${OVERLAY}/osd/osd-notify.sh" "${HOME}/.local/share/arktube-over
 
 echo "==> Building and deploying the standalone power menu"
 gcc -O2 -Wall \
-    "$(pkg-config --cflags gtk-layer-shell-0 gtk+-3.0)" \
+    $(pkg-config --cflags gtk-layer-shell-0 gtk+-3.0) \
     -o "${HERE}/src/overlay/power-menu/power-menu" \
     "${OVERLAY}/power-menu/power-menu.c" \
-    "$(pkg-config --libs gtk-layer-shell-0 gtk+-3.0)"
+    $(pkg-config --libs gtk-layer-shell-0 gtk+-3.0)
 install -Dm755 "${OVERLAY}/power-menu/power-menu" "${HOME}/.local/share/arktube-overlay/power-menu"
 # Same build-and-deploy-every-run pattern as the OSD immediately above,
 # and same reason to be a separate binary from it (see power-menu.c's
